@@ -3,6 +3,9 @@ synopsis: |
     Tetragon - eBPF-based Security Observability and Runtime Enforcement
 usage: tetragon [flags]
 options:
+    - name: bpf-dir
+      default_value: tetragon
+      usage: Set tetragon bpf directory (default 'tetragon')
     - name: bpf-lib
       default_value: /var/lib/tetragon/
       usage: Location of Tetragon libs (btf and bpf files)
@@ -10,11 +13,15 @@ options:
       usage: Location of btf
     - name: cgroup-rate
       usage: |
-        Base sensor events cgroup rate <events,interval> disabled by default ('1000/1s' means rate 1000 events per second
+        Base sensor events cgroup rate <events,interval> disabled by default ('1000,1s' means rate 1000 events per second)
+    - name: cluster-name
+      usage: Name of the cluster where Tetragon is installed
     - name: config-dir
       usage: Configuration directory that contains a file for each option
     - name: cpuprofile
       usage: Store CPU profile into provided file
+    - name: cri-endpoint
+      usage: CRI endpoint
     - name: data-cache-size
       default_value: "1024"
       usage: Size of the data events cache
@@ -25,6 +32,19 @@ options:
     - name: disable-kprobe-multi
       default_value: "false"
       usage: Allow to disable kprobe multi interface
+    - name: enable-cgidmap
+      default_value: "false"
+      usage: enable pod resolution via cgroup ids
+    - name: enable-cgidmap-debug
+      default_value: "false"
+      usage: enable cgidmap debugging info
+    - name: enable-compatibility-syscall64-size-type
+      default_value: "false"
+      usage: |
+        syscall64 type will produce output of type size (compatibility flag, will be removed in v1.4)
+    - name: enable-cri
+      default_value: "false"
+      usage: enable CRI client for tetragon
     - name: enable-export-aggregation
       default_value: "false"
       usage: Enable JSON export aggregation
@@ -44,13 +64,10 @@ options:
       usage: Enable PodInfo custom resource
     - name: enable-policy-filter
       default_value: "false"
-      usage: Enable policy filter code (beta)
+      usage: Enable policy filter code
     - name: enable-policy-filter-debug
       default_value: "false"
       usage: Enable policy filter debug messages
-    - name: enable-process-ancestors
-      default_value: "true"
-      usage: Include ancestors in process exec events
     - name: enable-process-cred
       default_value: "false"
       usage: Enable process_cred events
@@ -62,6 +79,12 @@ options:
       default_value: "true"
       usage: |
         Enable TracingPolicy and TracingPolicyNamespaced custom resources
+    - name: event-cache-retries
+      default_value: "15"
+      usage: Number of retries for event cache
+    - name: event-cache-retry-delay
+      default_value: "2"
+      usage: Delay in seconds between event cache retries
     - name: event-queue-size
       default_value: "10000"
       usage: Set the size of the internal event queue.
@@ -97,9 +120,6 @@ options:
       default_value: "-1"
       usage: |
         Rate limit (per minute) for event export. Set to -1 to disable
-    - name: expose-kernel-addresses
-      default_value: "false"
-      usage: Expose real kernel addresses in events stack traces
     - name: expose-stack-addresses
       default_value: "false"
       usage: Expose real linear addresses in events stack traces
@@ -131,11 +151,11 @@ options:
       usage: help for tetragon
     - name: k8s-kubeconfig-path
       usage: Absolute path of the kubernetes kubeconfig file
+    - name: keep-sensors-on-exit
+      default_value: "false"
+      usage: Do not unload sensors on exit
     - name: kernel
       usage: Kernel version
-    - name: kmods
-      default_value: '[]'
-      usage: List of kernel modules to load symbols from
     - name: log-format
       default_value: text
       usage: Set log format
@@ -153,8 +173,12 @@ options:
     - name: netns-dir
       default_value: /var/run/docker/netns/
       usage: Network namespace dir
-    - name: pprof-addr
-      usage: Profile via pprof http
+    - name: pprof-address
+      usage: |
+        Serves runtime profile data via HTTP (e.g. 'localhost:6060'). Disabled by default
+    - name: process-cache-gc-interval
+      default_value: 30s
+      usage: Time between checking the process cache for old entries
     - name: process-cache-size
       default_value: "65536"
       usage: Size of the process cache
@@ -182,7 +206,7 @@ options:
     - name: server-address
       default_value: localhost:54321
       usage: |
-        gRPC server address (e.g. 'localhost:54321' or 'unix:///var/run/tetragon/tetragon.sock'
+        gRPC server address (e.g. 'localhost:54321' or 'unix:///var/run/tetragon/tetragon.sock'). An empty address disables the gRPC server
     - name: tracing-policy
       usage: Tracing policy file to load at startup
     - name: tracing-policy-dir

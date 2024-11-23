@@ -28,7 +28,6 @@ import (
 	"github.com/cilium/tetragon/pkg/logger"
 	"github.com/cilium/tetragon/pkg/observer"
 	"github.com/cilium/tetragon/pkg/option"
-	"github.com/cilium/tetragon/pkg/sensors/base"
 	"github.com/cilium/tetragon/pkg/sensors/cgroup/cgrouptrackmap"
 	"github.com/cilium/tetragon/pkg/sensors/config/confmap"
 	"github.com/cilium/tetragon/pkg/sensors/exec/procevents"
@@ -129,7 +128,7 @@ func logTetragonConfig(t *testing.T, mapDir string) error {
 	}
 
 	t.Logf("Test %s tetragon configuration: cgroup.magic=%s  logLevel=%d  cgroup.hierarchyID=%d  cgroup.subsysIdx=%d  cgroup.trackinglevel=%d  cgroup.ID=%d",
-		t.Name(), cgroups.CgroupFsMagicStr(conf.CgrpFsMagic), conf.LogLevel, conf.TgCgrpHierarchy, conf.TgCgrpSubsysIdx, conf.TgCgrpLevel, conf.TgCgrpId)
+		t.Name(), cgroups.CgroupFsMagicStr(conf.CgrpFsMagic), conf.LogLevel, conf.TgCgrpHierarchy, conf.TgCgrpv1SubsysIdx, conf.TgCgrpLevel, conf.TgCgrpId)
 
 	return nil
 }
@@ -581,7 +580,7 @@ func setupTgRuntimeConf(t *testing.T, trackingCgrpLevel, logLevel, hierarchyId, 
 	}
 
 	if subSysIdx != invalidValue {
-		val.TgCgrpSubsysIdx = subSysIdx
+		val.TgCgrpv1SubsysIdx = subSysIdx
 	}
 
 	mapDir := bpf.MapPrefixPath()
@@ -591,8 +590,8 @@ func setupTgRuntimeConf(t *testing.T, trackingCgrpLevel, logLevel, hierarchyId, 
 	}
 }
 
-func setupObserver(ctx context.Context, t *testing.T) *tus.TestSensorManager {
-	testManager := tus.GetTestSensorManager(ctx, t)
+func setupObserver(t *testing.T) *tus.TestSensorManager {
+	testManager := tus.GetTestSensorManager(t)
 	if err := observer.InitDataCache(1024); err != nil {
 		t.Fatalf("failed to call observer.InitDataCache %s", err)
 	}
@@ -605,7 +604,7 @@ func TestLoadCgroupsPrograms(t *testing.T) {
 
 	option.Config.HubbleLib = tus.Conf().TetragonLib
 	option.Config.Verbosity = 5
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 	tus.LoadSensor(t, testsensor.GetTestSensor())
 	tus.LoadSensor(t, testsensor.GetCgroupSensor())
 }
@@ -617,7 +616,7 @@ func TestTgRuntimeConf(t *testing.T) {
 	option.Config.HubbleLib = tus.Conf().TetragonLib
 	option.Config.Verbosity = 5
 
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 
 	val, err := testutils.GetTgRuntimeConf()
 	assert.NoError(t, err)
@@ -635,7 +634,7 @@ func TestTgRuntimeConf(t *testing.T) {
 	assert.EqualValues(t, ret, val)
 
 	assert.Equal(t, ret.TgCgrpHierarchy, cgroups.GetCgrpHierarchyID())
-	assert.Equal(t, ret.TgCgrpSubsysIdx, cgroups.GetCgrpSubsystemIdx())
+	assert.Equal(t, ret.TgCgrpv1SubsysIdx, cgroups.GetCgrpv1SubsystemIdx())
 	assert.Equal(t, ret.LogLevel, uint32(logger.GetLogLevel()))
 }
 
@@ -648,9 +647,9 @@ func TestCgroupNoEvents(t *testing.T) {
 	option.Config.HubbleLib = tus.Conf().TetragonLib
 	option.Config.Verbosity = 5
 
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 
-	testManager := setupObserver(ctx, t)
+	testManager := setupObserver(t)
 
 	testManager.AddAndEnableSensors(ctx, t, getLoadedSensors())
 
@@ -700,9 +699,9 @@ func TestCgroupEventMkdirRmdir(t *testing.T) {
 	option.Config.HubbleLib = tus.Conf().TetragonLib
 	option.Config.Verbosity = 5
 
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 
-	testManager := setupObserver(ctx, t)
+	testManager := setupObserver(t)
 
 	testManager.AddAndEnableSensors(ctx, t, getLoadedSensors())
 	t.Cleanup(func() {
@@ -881,7 +880,7 @@ func testCgroupv2HierarchyInUnified(ctx context.Context, t *testing.T,
 // Test Cgroupv2 tries to emulate k8s hierarchy without exec context
 // Works in systemd unified and hybrid mode according to parameter
 func testCgroupv2K8sHierarchy(ctx context.Context, t *testing.T, mode cgroups.CgroupModeCode, withExec bool) {
-	testManager := setupObserver(ctx, t)
+	testManager := setupObserver(t)
 
 	testManager.AddAndEnableSensors(ctx, t, getLoadedSensors())
 	t.Cleanup(func() {
@@ -1051,7 +1050,7 @@ func TestCgroupv2K8sHierarchyInUnified(t *testing.T) {
 	option.Config.HubbleLib = tus.Conf().TetragonLib
 	option.Config.Verbosity = 5
 
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 
 	// Probe full environment detection
 	setupTgRuntimeConf(t, invalidValue, invalidValue, invalidValue, invalidValue)
@@ -1073,7 +1072,7 @@ func TestCgroupv2K8sHierarchyInHybrid(t *testing.T) {
 	option.Config.HubbleLib = tus.Conf().TetragonLib
 	option.Config.Verbosity = 5
 
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 
 	// Probe full environment detection
 	setupTgRuntimeConf(t, invalidValue, invalidValue, invalidValue, invalidValue)
@@ -1093,9 +1092,9 @@ func testCgroupv1K8sHierarchyInHybrid(t *testing.T, withExec bool, selectedContr
 	option.Config.HubbleLib = tus.Conf().TetragonLib
 	option.Config.Verbosity = 5
 
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 
-	testManager := setupObserver(ctx, t)
+	testManager := setupObserver(t)
 
 	testManager.AddAndEnableSensors(ctx, t, getLoadedSensors())
 
@@ -1323,7 +1322,7 @@ func TestCgroupv1ExecK8sHierarchyInHybridMemory(t *testing.T) {
 	testCgroupv1K8sHierarchyInHybrid(t, true, "memory")
 }
 
-// This test will use the piDisableSensorsds cgroup controller if available
+// This test will use the pids cgroup controller if available
 func TestCgroupv1ExecK8sHierarchyInHybridPids(t *testing.T) {
 	testCgroupv1K8sHierarchyInHybrid(t, true, "pids")
 }
@@ -1350,7 +1349,7 @@ func TestCgroupv2ExecK8sHierarchyInUnified(t *testing.T) {
 	option.Config.HubbleLib = tus.Conf().TetragonLib
 	option.Config.Verbosity = 5
 
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 
 	// Probe full environment detection
 	_, err := testutils.GetTgRuntimeConf()

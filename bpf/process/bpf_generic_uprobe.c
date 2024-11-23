@@ -24,12 +24,28 @@ struct {
 	__type(value, struct msg_generic_kprobe);
 } process_call_heap SEC(".maps");
 
+int generic_uprobe_setup_event(void *ctx);
+int generic_uprobe_process_event(void *ctx);
+int generic_uprobe_process_filter(void *ctx);
+int generic_uprobe_filter_arg(void *ctx);
+int generic_uprobe_actions(void *ctx);
+int generic_uprobe_output(void *ctx);
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
 	__uint(max_entries, 13);
 	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(__u32));
-} uprobe_calls SEC(".maps");
+	__array(values, int(void *));
+} uprobe_calls SEC(".maps") = {
+	.values = {
+		[0] = (void *)&generic_uprobe_setup_event,
+		[1] = (void *)&generic_uprobe_process_event,
+		[2] = (void *)&generic_uprobe_process_filter,
+		[3] = (void *)&generic_uprobe_filter_arg,
+		[4] = (void *)&generic_uprobe_actions,
+		[5] = (void *)&generic_uprobe_output,
+	},
+};
 
 struct filter_map_value {
 	unsigned char buf[FILTER_SIZE];
@@ -53,51 +69,9 @@ struct {
 static struct generic_maps maps = {
 	.heap = (struct bpf_map_def *)&process_call_heap,
 	.calls = (struct bpf_map_def *)&uprobe_calls,
+	.config = (struct bpf_map_def *)&config_map,
 	.filter = (struct bpf_map_def *)&filter_map,
 };
-
-FUNC_INLINE int
-generic_uprobe_start_process_filter(void *ctx)
-{
-	struct msg_generic_kprobe *msg;
-	struct event_config *config;
-	struct task_struct *task;
-	int i, zero = 0;
-
-	msg = map_lookup_elem(&process_call_heap, &zero);
-	if (!msg)
-		return 0;
-	/* Initialize selector index to 0 */
-	msg->sel.curr = 0;
-#pragma unroll
-	for (i = 0; i < MAX_CONFIGURED_SELECTORS; i++)
-		msg->sel.active[i] = 0;
-	/* Initialize accept field to reject */
-	msg->sel.pass = false;
-	msg->tailcall_index_process = 0;
-	msg->tailcall_index_selector = 0;
-	task = (struct task_struct *)get_current_task();
-	/* Initialize namespaces to apply filters on them */
-	get_namespaces(&msg->ns, task);
-	/* Initialize capabilities to apply filters on them */
-	get_current_subj_caps(&msg->caps, task);
-#ifdef __NS_CHANGES_FILTER
-	msg->sel.match_ns = 0;
-#endif
-#ifdef __CAP_CHANGES_FILTER
-	msg->sel.match_cap = 0;
-#endif
-	msg->idx = get_index(ctx);
-	// setup index and function id
-	config = map_lookup_elem(&config_map, &msg->idx);
-	if (!config)
-		return 0;
-	msg->func_id = config->func_id;
-	msg->retprobe_id = 0;
-	/* Tail call into filters. */
-	tail_call(ctx, &uprobe_calls, TAIL_CALL_FILTER);
-	return 0;
-}
 
 #ifdef __MULTI_KPROBE
 #define MAIN "uprobe.multi/generic_uprobe"
@@ -108,10 +82,10 @@ generic_uprobe_start_process_filter(void *ctx)
 __attribute__((section((MAIN)), used)) int
 generic_uprobe_event(struct pt_regs *ctx)
 {
-	return generic_uprobe_start_process_filter(ctx);
+	return generic_start_process_filter(ctx, &maps);
 }
 
-__attribute__((section("uprobe/0"), used)) int
+__attribute__((section("uprobe"), used)) int
 generic_uprobe_setup_event(void *ctx)
 {
 	return generic_process_event_and_setup(
@@ -120,7 +94,7 @@ generic_uprobe_setup_event(void *ctx)
 		(struct bpf_map_def *)&config_map, 0);
 }
 
-__attribute__((section("uprobe/1"), used)) int
+__attribute__((section("uprobe"), used)) int
 generic_uprobe_process_event(void *ctx)
 {
 	return generic_process_event(ctx,
@@ -129,7 +103,7 @@ generic_uprobe_process_event(void *ctx)
 				     (struct bpf_map_def *)&config_map, 0);
 }
 
-__attribute__((section("uprobe/2"), used)) int
+__attribute__((section("uprobe"), used)) int
 generic_uprobe_process_filter(void *ctx)
 {
 	int ret;
@@ -146,7 +120,7 @@ generic_uprobe_process_filter(void *ctx)
 	return PFILTER_REJECT;
 }
 
-__attribute__((section("uprobe/3"), used)) int
+__attribute__((section("uprobe"), used)) int
 generic_uprobe_filter_arg(void *ctx)
 {
 	return filter_read_arg(ctx, (struct bpf_map_def *)&process_call_heap,
@@ -156,13 +130,14 @@ generic_uprobe_filter_arg(void *ctx)
 			       true);
 }
 
-__attribute__((section("uprobe/4"), used)) int
+__attribute__((section("uprobe"), used)) int
 generic_uprobe_actions(void *ctx)
 {
-	return generic_actions(ctx, &maps);
+	generic_actions(ctx, &maps);
+	return 0;
 }
 
-__attribute__((section("uprobe/5"), used)) int
+__attribute__((section("uprobe"), used)) int
 generic_uprobe_output(void *ctx)
 {
 	return generic_output(ctx, (struct bpf_map_def *)&process_call_heap, MSG_OP_GENERIC_UPROBE);

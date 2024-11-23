@@ -1,35 +1,63 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Authors of Tetragon
 
-# renovate: datasource=docker
-HELM_IMAGE=docker.io/alpine/helm:3.15.2@sha256:61185768b41810085cb57a9bc8de9003bea78ac0dd417e5b0b16223a6a0aa812
-# renovate: datasource=docker
-KUBECONFORM_IMAGE=ghcr.io/yannh/kubeconform:v0.6.6-alpine@sha256:47141997365b1f6aa914b2e801cb9772b94c2696c279e2046a4517d5bfd8a09a
-# renovate: datasource=docker
-HELMDOCS_IMAGE=docker.io/jnorwood/helm-docs:v1.13.1@sha256:717bd8f770bd1d25ccf79c876f1420e105832f2d6bbde12170405f58f540cb2d
+include ../../Makefile.defs
 
-REPO_ROOT := $(shell git rev-parse --show-toplevel)
-TETRAGON_CHART := tetragon
-CRDS := $(REPO_ROOT)/pkg/k8s/apis/cilium.io/client/crds/v1alpha1
+#
+# -- Images
+#
+# renovate: datasource=docker
+HELM_IMAGE = docker.io/alpine/helm:3.16.3@sha256:683f84a965c0f5e2fab5e9f0d35b16fd4e3ef659079a6893e6c18a1ee1db8250
+# renovate: datasource=docker
+KUBECONFORM_IMAGE = ghcr.io/yannh/kubeconform:v0.6.7-alpine@sha256:824e0c248809e4b2da2a768b16b107cf17ada88a89ec6aa6050e566ba93ebbc6
+# renovate: datasource=docker
+HELMDOCS_IMAGE = docker.io/jnorwood/helm-docs:v1.14.2@sha256:7e562b49ab6b1dbc50c3da8f2dd6ffa8a5c6bba327b1c6335cc15ce29267979c
+# renovate: datasource=docker
+PYTHON_IMAGE = docker.io/python:3.13-slim-bookworm
 
-HELM ?= docker run --rm -v $(CURDIR)/$(TETRAGON_CHART):/apps $(HELM_IMAGE)
+#
+# -- Versions
+#
+# renovate: datasource=github-releases depName=yannh/kubeconform
+KUBECONFORM_VERSION = v0.6.7
+K8S_VERSION = master
+
+#
+# -- Variables
+#
+HELM_VALUES_OVERRIDE = helm_lint_values_override.yaml
+ROOT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
+TETRAGON_CHART = tetragon
+CRDS_RELATIVE_DIR = pkg/k8s/apis/cilium.io/client/crds/v1alpha1
+CRDS := $(ROOT_DIR)/$(CRDS_RELATIVE_DIR)
+JSON_SCHEMAS := $(ROOT_DIR)/install/kubernetes/schemas
+
+#
+# -- Commands
+#
+PYTHON := docker run --rm \
+		-v $(ROOT_DIR):/code \
+		--workdir=/code/install/kubernetes \
+		-e FILENAME_FORMAT='{kind}-{fullgroup}' \
+		$(PYTHON_IMAGE)
+HELM := docker run --rm -u $(shell id -u):$(shell id -g) \
+		-v $(CURDIR)/$(TETRAGON_CHART):/apps \
+		-v $(CURDIR)/$(HELM_VALUES_OVERRIDE):/$(HELM_VALUES_OVERRIDE) \
+		$(HELM_IMAGE)
+
+#
+# -- Make targets
+#
+
+##@ Build
 
 .PHONY: all
-all: deps $(TETRAGON_CHART)/crds-yaml lint docs
-
-.PHONY: deps
-deps: 
-	$(HELM) dependency update .
-
-.PHONY: lint
-lint:
-	$(HELM) lint . --with-subcharts
-	$(HELM) template tetragon . | docker run --rm -i $(KUBECONFORM_IMAGE) --strict --schema-location default
+all: docs $(TETRAGON_CHART)/crds-yaml
 
 .PHONY: docs
-docs:
+docs: ## Generate Helm docs for the README.md
 	docker run --rm -v $(CURDIR)/$(TETRAGON_CHART):/helm-docs -u $$(id -u) $(HELMDOCS_IMAGE)
-	./export-doc.sh $(REPO_ROOT)/docs/content/en/docs/reference/helm-chart.md
+	./export-doc.sh $(ROOT_DIR)/docs/content/en/docs/reference/helm-chart.md
 
 # NB: Helm has an "official" way to install CRDs which requires simply putting
 # them in the crds directory. This method doesn't prevents accidental deletion
@@ -40,3 +68,49 @@ docs:
 .PHONY: $(TETRAGON_CHART)/crds-yaml
 $(TETRAGON_CHART)/crds-yaml: $(CRDS)
 	cp -rf $(CRDS)/. $(TETRAGON_CHART)/crds-yaml
+
+##@ Validation
+
+.PHONY: validation
+validation: ## Validate/lint the Helm chart and all its resources
+	$(MAKE) lint
+	$(MAKE) kubeconform
+
+.PHONY: openapi2jsonschema.py
+openapi2jsonschema.py: ## openapi2jsonschema.py script generating JSON schema from the CRD YAML spec.
+	curl -sSfLO https://raw.githubusercontent.com/yannh/kubeconform/$(KUBECONFORM_VERSION)/scripts/$@
+
+.PHONY: lint
+lint: ## Lint the Helm chart
+	$(HELM) lint . --with-subcharts
+
+.PHONY: kubeconform
+# Run kubeconform Helm chart validation checks to validate the templated
+# Kubernetes (custom) resources against their spec.
+# To validate potentially included Tetragon CRs in the Helm chart (using
+# openapi2jsonschema.py), we need to have the JSON schema of the TracingPolicy
+# CRD. Skip validating the Tetragon CRDs themselves (circular dependency).
+kubeconform: ## Validate Helm chart using kubeconform
+kubeconform:
+	mkdir -p $(JSON_SCHEMAS)/
+	$(PYTHON) /bin/bash -c "pip install pyyaml && python /code/install/kubernetes/openapi2jsonschema.py /code/$(CRDS_RELATIVE_DIR)/*"
+	mv $(ROOT_DIR)/install/kubernetes/*-cilium.io.json $(JSON_SCHEMAS)/
+	@echo "## Testing Helm chart: \"$(TETRAGON_CHART)\""
+	$(HELM) template $(TETRAGON_CHART) . \
+	-f values.yaml \
+	-f /$(HELM_VALUES_OVERRIDE) \
+	| docker run --rm -i -v $(JSON_SCHEMAS):/schemas $(KUBECONFORM_IMAGE) \
+		-summary \
+		-verbose \
+		-schema-location default \
+		-schema-location '/schemas/{{ .ResourceKind }}-{{ .Group }}.json' \
+		-skip CustomResourceDefinition \
+		-strict \
+		-kubernetes-version $(K8S_VERSION)
+	rm -rf $(JSON_SCHEMAS)/
+
+##@ Documentation
+
+.PHONY: help
+help: ## Display this help, based on https://www.thapaliya.com/en/writings/well-documented-makefiles/
+	$(call print_help_from_comments)

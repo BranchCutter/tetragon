@@ -31,6 +31,14 @@ type TestDelayedSensor struct {
 	ch     chan struct{}
 }
 
+func (tds TestDelayedSensor) Overhead() ([]ProgOverhead, bool) {
+	return []ProgOverhead{}, false
+}
+
+func (tds TestDelayedSensor) TotalMemlock() int {
+	return 0
+}
+
 func (tds *TestDelayedSensor) GetName() string {
 	return tds.name
 }
@@ -49,7 +57,7 @@ func (tds *TestDelayedSensor) Load(_ string) error {
 	return nil
 }
 
-func (tds *TestDelayedSensor) Unload() error {
+func (tds *TestDelayedSensor) Unload(_ bool) error {
 	select {
 	case <-tds.ch:
 	case <-time.After(10 * time.Second):
@@ -59,14 +67,14 @@ func (tds *TestDelayedSensor) Unload() error {
 	return nil
 }
 
-func (tds *TestDelayedSensor) Destroy() {
+func (tds *TestDelayedSensor) Destroy(_ bool) {
 	tds.loaded = false
 }
 
 func (tds *TestDelayedSensor) unblock(t *testing.T) {
 	select {
 	case tds.ch <- struct{}{}:
-	default:
+	case <-time.After(10 * time.Second):
 		t.Fatalf("unblocked failed: channel does not seem to be empty")
 	}
 

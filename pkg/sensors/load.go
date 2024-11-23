@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 	cachedbtf "github.com/cilium/tetragon/pkg/btf"
 	"github.com/cilium/tetragon/pkg/kernels"
 	"github.com/cilium/tetragon/pkg/logger"
@@ -62,8 +63,54 @@ func LoadConfig(bpfDir string, sens []*Sensor) error {
 	return nil
 }
 
+func (s *Sensor) policyDir() string {
+	if s.Namespace == "" {
+		return sanitize(s.Policy)
+	}
+	return fmt.Sprintf("%s:%s", s.Namespace, sanitize(s.Policy))
+}
+
+func (s *Sensor) createDirs(bpfDir string) {
+	for _, p := range s.Progs {
+		// setup sensor based program pin path
+		p.PinPath = filepath.Join(s.policyDir(), s.Name, p.PinName)
+		// and make the path
+		if err := os.MkdirAll(filepath.Join(bpfDir, p.PinPath), os.ModeDir); err != nil {
+			logger.GetLogger().WithError(err).
+				WithField("prog", p.PinName).
+				WithField("dir", p.PinPath).
+				Warn("Failed to create program dir")
+		}
+	}
+	s.BpfDir = bpfDir
+}
+
+func (s *Sensor) removeDirs() {
+	// Remove all the program dirs
+	for _, p := range s.Progs {
+		if err := os.Remove(filepath.Join(s.BpfDir, p.PinPath)); err != nil {
+			logger.GetLogger().WithError(err).
+				WithField("prog", p.PinName).
+				WithField("dir", p.PinPath).
+				Warn("Failed to remove program dir")
+		}
+	}
+	// Remove sensor dir
+	if err := os.Remove(filepath.Join(s.BpfDir, s.policyDir(), s.Name)); err != nil {
+		logger.GetLogger().WithError(err).
+			WithField("sensor", s.Name).
+			WithField("dir", filepath.Join(s.policyDir(), s.Name)).
+			Warn("Failed to remove sensor dir")
+	}
+
+	// For policy dir the last one switches off the light.. there still
+	// might be other sensors in the policy, so the last sensors removed
+	// will succeed in removal policy dir.
+	os.Remove(filepath.Join(s.BpfDir, s.policyDir()))
+}
+
 // Load loads the sensor, by loading all the BPF programs and maps.
-func (s *Sensor) Load(bpfDir string) error {
+func (s *Sensor) Load(bpfDir string) (err error) {
 	if s == nil {
 		return nil
 	}
@@ -72,16 +119,28 @@ func (s *Sensor) Load(bpfDir string) error {
 		return fmt.Errorf("sensor %s has been previously destroyed, please recreate it before loading", s.Name)
 	}
 
-	// Add the loaded programs and maps to All* so they can be unloaded on shutdown.
-	AllPrograms = append(AllPrograms, s.Progs...)
-	AllMaps = append(AllMaps, s.Maps...)
-
 	logger.GetLogger().WithField("metadata", cachedbtf.GetCachedBTFFile()).Info("BTF file: using metadata file")
-	if _, err := observerMinReqs(); err != nil {
+	if _, err = observerMinReqs(); err != nil {
 		return fmt.Errorf("tetragon, aborting minimum requirements not met: %w", err)
 	}
 
-	os.Mkdir(bpfDir, os.ModeDir)
+	var (
+		loadedMaps  []*program.Map
+		loadedProgs []*program.Program
+	)
+
+	s.createDirs(bpfDir)
+	defer func() {
+		if err != nil {
+			for _, m := range loadedMaps {
+				m.Unload(true)
+			}
+			for _, p := range loadedProgs {
+				unloadProgram(p, true)
+			}
+			s.removeDirs()
+		}
+	}()
 
 	l := logger.GetLogger()
 
@@ -93,12 +152,15 @@ func (s *Sensor) Load(bpfDir string) error {
 	_, verStr, _ := kernels.GetKernelVersion(option.Config.KernelVersion, option.Config.ProcFS)
 	l.Infof("Loading kernel version %s", verStr)
 
-	if err := s.FindPrograms(); err != nil {
+	if err = s.FindPrograms(); err != nil {
 		return fmt.Errorf("tetragon, aborting could not find BPF programs: %w", err)
 	}
 
-	if err := s.loadMaps(bpfDir); err != nil {
-		return fmt.Errorf("tetragon, aborting could not load sensor BPF maps: %w", err)
+	for _, m := range s.Maps {
+		if err = s.loadMap(bpfDir, m); err != nil {
+			return fmt.Errorf("tetragon, aborting could not load sensor BPF maps: %w", err)
+		}
+		loadedMaps = append(loadedMaps, m)
 	}
 
 	for _, p := range s.Progs {
@@ -108,18 +170,27 @@ func (s *Sensor) Load(bpfDir string) error {
 			continue
 		}
 
-		if err := observerLoadInstance(bpfDir, p); err != nil {
+		if err = observerLoadInstance(bpfDir, p); err != nil {
 			return err
 		}
 		p.LoadState.RefInc()
+		loadedProgs = append(loadedProgs, p)
 		l.WithField("prog", p.Name).WithField("label", p.Label).Debugf("BPF prog was loaded")
 	}
+
+	// Add the *loaded* programs and maps, so they can be unloaded later
+	progsAdd(s.Progs)
+	AllMaps = append(AllMaps, s.Maps...)
+
+	// cleanup the BTF once we have loaded all sensor's program
+	btf.FlushKernelSpec()
+
 	l.WithField("sensor", s.Name).Infof("Loaded BPF maps and events for sensor successfully")
 	s.Loaded = true
 	return nil
 }
 
-func (s *Sensor) Unload() error {
+func (s *Sensor) Unload(unpin bool) error {
 	logger.GetLogger().Infof("Unloading sensor %s", s.Name)
 	if !s.Loaded {
 		return fmt.Errorf("unload of sensor %s failed: sensor not loaded", s.Name)
@@ -132,13 +203,17 @@ func (s *Sensor) Unload() error {
 	}
 
 	for _, p := range s.Progs {
-		unloadProgram(p)
+		unloadProgram(p, unpin)
 	}
 
 	for _, m := range s.Maps {
-		if err := m.Unload(); err != nil {
+		if err := m.Unload(unpin); err != nil {
 			logger.GetLogger().WithError(err).WithField("map", s.Name).Warn("Failed to unload map")
 		}
+	}
+
+	if unpin {
+		s.removeDirs()
 	}
 
 	s.Loaded = false
@@ -149,13 +224,14 @@ func (s *Sensor) Unload() error {
 		}
 	}
 
+	progsCleanup()
 	return nil
 }
 
 // Destroy will unload the hook and call DestroyHook, this hook is usually used
 // to clean up resources that were created during creation of the sensor.
-func (s *Sensor) Destroy() {
-	err := s.Unload()
+func (s *Sensor) Destroy(unpin bool) {
+	err := s.Unload(unpin)
 	if err != nil {
 		// do not return on error but just log since Unload can only error on
 		// sensor being already not loaded
@@ -207,30 +283,47 @@ func (s *Sensor) FindPrograms() error {
 	return nil
 }
 
-// loadMaps loads all the BPF maps in the sensor.
-func (s *Sensor) loadMaps(bpfDir string) error {
+func (s *Sensor) setMapPinPath(m *program.Map) {
+	policy := s.policyDir()
+	switch m.Type {
+	case program.MapTypeGlobal:
+		m.PinPath = filepath.Join(m.Name)
+	case program.MapTypePolicy:
+		m.PinPath = filepath.Join(policy, m.Name)
+	case program.MapTypeSensor:
+		m.PinPath = filepath.Join(policy, s.Name, m.Name)
+	case program.MapTypeProgram:
+		m.PinPath = filepath.Join(policy, s.Name, m.Prog.PinName, m.Name)
+	}
+}
+
+// loadMap loads BPF map in the sensor.
+func (s *Sensor) loadMap(bpfDir string, m *program.Map) error {
 	l := logger.GetLogger()
-	for _, m := range s.Maps {
-		if m.PinState.IsLoaded() {
-			l.WithFields(logrus.Fields{
-				"sensor": s.Name,
-				"map":    m.Name,
-			}).Info("map is already loaded, incrementing reference count")
-			m.PinState.RefInc()
-			continue
-		}
+	if m.PinState.IsLoaded() {
+		l.WithFields(logrus.Fields{
+			"sensor": s.Name,
+			"map":    m.Name,
+		}).Info("map is already loaded, incrementing reference count")
+		m.PinState.RefInc()
+		return nil
+	}
 
-		pinPath := filepath.Join(bpfDir, m.PinName)
+	spec, err := ebpf.LoadCollectionSpec(m.Prog.Name)
+	if err != nil {
+		return fmt.Errorf("failed to open collection '%s': %w", m.Prog.Name, err)
+	}
+	mapSpec, ok := spec.Maps[m.Name]
+	if !ok {
+		return fmt.Errorf("map '%s' not found from '%s'", m.Name, m.Prog.Name)
+	}
 
-		spec, err := ebpf.LoadCollectionSpec(m.Prog.Name)
-		if err != nil {
-			return fmt.Errorf("failed to open collection '%s': %w", m.Prog.Name, err)
-		}
-		mapSpec, ok := spec.Maps[m.Name]
-		if !ok {
-			return fmt.Errorf("map '%s' not found from '%s'", m.Name, m.Prog.Name)
-		}
+	s.setMapPinPath(m)
+	pinPath := filepath.Join(bpfDir, m.PinPath)
 
+	if m.IsOwner() {
+		// If map is the owner we set configured max entries
+		// directly to map spec.
 		if max, ok := m.GetMaxEntries(); ok {
 			mapSpec.MaxEntries = max
 		}
@@ -240,17 +333,41 @@ func (s *Sensor) loadMaps(bpfDir string) error {
 				mapSpec.InnerMap.MaxEntries = innerMax
 			}
 		}
+	} else {
+		// If map is NOT the owner we follow the max entries
+		// of the pinned map and update the spec with that.
+		max, err := program.GetMaxEntriesPinnedMap(pinPath)
+		if err != nil {
+			return err
+		}
+		mapSpec.MaxEntries = max
 
-		if err := m.LoadOrCreatePinnedMap(pinPath, mapSpec); err != nil {
-			return fmt.Errorf("failed to load map '%s' for sensor '%s': %w", m.Name, s.Name, err)
+		// 'm' is not the owner but for some reason requires max
+		// entries setup, make sure it matches the pinned map.
+		if max, ok := m.GetMaxEntries(); ok {
+			if mapSpec.MaxEntries != max {
+				return fmt.Errorf("failed to load map '%s' max entries mismatch: %d %d",
+					m.Name, mapSpec.MaxEntries, max)
+			}
 		}
 
-		l.WithFields(logrus.Fields{
-			"sensor": s.Name,
-			"map":    m.Name,
-			"path":   pinPath,
-		}).Info("tetragon, map loaded.")
+		m.SetMaxEntries(int(max))
 	}
+
+	// Disable content loading at this point, we just care about the map,
+	// the content will be loaded when the whole object gets loaded.
+	mapSpec.Contents = nil
+
+	if err := m.LoadOrCreatePinnedMap(pinPath, mapSpec); err != nil {
+		return fmt.Errorf("failed to load map '%s' for sensor '%s': %w", m.Name, s.Name, err)
+	}
+
+	l.WithFields(logrus.Fields{
+		"sensor": s.Name,
+		"map":    m.Name,
+		"path":   pinPath,
+		"max":    m.Entries,
+	}).Info("tetragon, map loaded.")
 
 	return nil
 }
@@ -280,14 +397,14 @@ func observerLoadInstance(bpfDir string, load *program.Program) error {
 	l.WithFields(logrus.Fields{
 		"prog":         load.Name,
 		"kern_version": version,
-	}).Debug("observerLoadInstance", load.Name, version)
+	}).Debugf("observerLoadInstance %s %d", load.Name, version)
 	if load.Type == "tracepoint" {
 		err = loadInstance(bpfDir, load, version, option.Config.Verbosity)
 		if err != nil {
 			l.WithField(
 				"tracepoint", load.Name,
 			).Info("Failed to load, trying to remove and retrying")
-			load.Unload()
+			load.Unload(true)
 			err = loadInstance(bpfDir, load, version, option.Config.Verbosity)
 		}
 		if err != nil {
@@ -300,7 +417,7 @@ func observerLoadInstance(bpfDir string, load *program.Program) error {
 			l.WithField(
 				"raw_tracepoint", load.Name,
 			).Info("Failed to load, trying to remove and retrying")
-			load.Unload()
+			load.Unload(true)
 			err = loadInstance(bpfDir, load, version, option.Config.Verbosity)
 		}
 		if err != nil {
@@ -355,7 +472,7 @@ func observerMinReqs() (bool, error) {
 	return true, nil
 }
 
-func unloadProgram(prog *program.Program) {
+func unloadProgram(prog *program.Program, unpin bool) {
 	log := logger.GetLogger().WithField("label", prog.Label).WithField("pin", prog.PinPath)
 
 	if !prog.LoadState.IsLoaded() {
@@ -367,7 +484,7 @@ func unloadProgram(prog *program.Program) {
 		return
 	}
 
-	if err := prog.Unload(); err != nil {
+	if err := prog.Unload(unpin); err != nil {
 		logger.GetLogger().WithField("name", prog.Name).WithError(err).Warn("Failed to unload program")
 	}
 
@@ -376,7 +493,7 @@ func unloadProgram(prog *program.Program) {
 
 func UnloadSensors(sens []SensorIface) {
 	for i := range sens {
-		if err := sens[i].Unload(); err != nil {
+		if err := sens[i].Unload(true); err != nil {
 			logger.GetLogger().Warnf("Failed to unload sensor: %s", err)
 		}
 	}

@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+
+ARG GOLANG_IMAGE=docker.io/library/golang:1.23.3@sha256:73f06be4578c9987ce560087e2e2ea6485fb605e3910542cadd8fa09fc5f3e31
+ARG BASE_IMAGE=docker.io/library/alpine:3.20.3@sha256:1e42bbe2508154c9126d48c2b8a75420c3544343bf86fd041fb7527e017a4b4a
+
+# BUILDPLATFORM is an automatic platform ARG enabled by Docker BuildKit.
+# Represents the plataform where the build is happening, do not mix with
+# TARGETARCH
+FROM --platform=${BUILDPLATFORM} ${GOLANG_IMAGE} AS builder
+# TARGETOS is an automatic platform ARG enabled by Docker BuildKit.
+ARG TARGETOS
+# TARGETARCH is an automatic platform ARG enabled by Docker BuildKit.
+ARG TARGETARCH
+WORKDIR /go/src/github.com/cilium/tetragon
+RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/tetragon \
+    --mount=target=/root/.cache,type=cache \
+    --mount=target=/go/pkg/mod,type=cache \
+    make GOARCH=${TARGETARCH} tetragon-oci-hook tetragon-oci-hook-setup tetragon-nri-hook \
+    && mkdir -p /out/${TARGETOS}/${TARGETARCH}/usr/bin \
+    && mv ./contrib/tetragon-rthooks/tetragon-oci-hook       /out/${TARGETOS}/${TARGETARCH}/usr/bin \
+    && mv ./contrib/tetragon-rthooks/tetragon-oci-hook-setup /out/${TARGETOS}/${TARGETARCH}/usr/bin \
+    && mv ./contrib/tetragon-rthooks/tetragon-nri-hook       /out/${TARGETOS}/${TARGETARCH}/usr/bin
+
+FROM ${BASE_IMAGE} AS release
+# TARGETOS is an automatic platform ARG enabled by Docker BuildKit.
+ARG TARGETOS
+# TARGETARCH is an automatic platform ARG enabled by Docker BuildKit.
+ARG TARGETARCH
+LABEL maintainer="maintainer@cilium.io"
+COPY --from=builder /out/${TARGETOS}/${TARGETARCH}/usr/bin/tetragon-oci-hook       /usr/bin/
+COPY --from=builder /out/${TARGETOS}/${TARGETARCH}/usr/bin/tetragon-oci-hook-setup /usr/bin/
+COPY --from=builder /out/${TARGETOS}/${TARGETARCH}/usr/bin/tetragon-nri-hook       /usr/bin/
+WORKDIR /

@@ -31,8 +31,10 @@ struct msg_selector_data {
 #ifdef __CAP_CHANGES_FILTER
 	__u64 match_cap;
 #endif
-	bool is32BitSyscall;
 };
+
+/* value to mask an offsset into msg_generic_kprobe->args */
+#define GENERIC_MSG_ARGS_MASK 0x7ff
 
 struct msg_generic_kprobe {
 	struct msg_common common;
@@ -55,6 +57,11 @@ struct msg_generic_kprobe {
 	__u32 tailcall_index_process; // recursion index for generic_process_event
 	__u32 tailcall_index_selector; // recursion index for filter_read_arg
 	int pass;
+	union {
+		struct {
+			bool post; // true if event needs to be posted
+		} lsm;
+	};
 };
 
 FUNC_INLINE size_t generic_kprobe_common_size(void)

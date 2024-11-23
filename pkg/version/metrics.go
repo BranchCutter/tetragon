@@ -31,7 +31,7 @@ func (b *buildInfoCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- b.self
 }
 
-func newBuildInfoCollector() prometheus.Collector {
+func NewBuildInfoCollector() prometheus.Collector {
 	buildInfo := ReadBuildInfo()
 	c := &buildInfoCollector{
 		prometheus.MustNewConstMetric(
@@ -40,6 +40,7 @@ func newBuildInfoCollector() prometheus.Collector {
 				"Build information about tetragon",
 				nil,
 				prometheus.Labels{
+					"version":    Version,
 					"go_version": buildInfo.GoVersion,
 					"commit":     buildInfo.Commit,
 					"time":       buildInfo.Time,
@@ -51,8 +52,4 @@ func newBuildInfoCollector() prometheus.Collector {
 	}
 	c.init(c.self)
 	return c
-}
-
-func InitMetrics(registry *prometheus.Registry) {
-	registry.MustRegister(newBuildInfoCollector())
 }

@@ -17,7 +17,8 @@ import "google/protobuf/field_mask.proto";
 // NOTE: EventType constants must be in sync with the numbers used in the
 // GetEventsResponse event oneof.
 enum EventType {
-	UNDEF = 0;
+    reserved 2 to 4, 6 to 8, 13 to 26;
+    UNDEF = 0;
 
     PROCESS_EXEC = 1;
     PROCESS_EXIT = 5;
@@ -26,6 +27,7 @@ enum EventType {
     PROCESS_LOADER = 11;
     PROCESS_UPROBE = 12;
     PROCESS_THROTTLE = 27;
+    PROCESS_LSM = 28;
 
     TEST = 40000;
     RATE_LIMIT_INFO = 40001;
@@ -59,6 +61,11 @@ message Filter {
 	CapFilter capabilities = 11;
     // Filter parent process' binary using RE2 regular expression syntax.
     repeated string parent_binary_regex = 12;
+    // Filter using CEL expressions.
+    repeated string cel_expression = 13;
+    // Filter by process.parent.arguments field using RE2 regular expression syntax:
+    // https://github.com/google/re2/wiki/Syntax
+    repeated string parent_arguments_regex = 14;
 }
 
 // Filter over a set of Linux process capabilities. See `message Capabilities`
@@ -168,6 +175,7 @@ message ProcessThrottle {
 }
 
 message GetEventsResponse {
+    reserved 2 to 4, 6 to 8, 13 to 26;
     // The type-specific fields of an event.
     //
     // NOTE: Numbers must stay in sync with enum EventType.
@@ -186,6 +194,7 @@ message GetEventsResponse {
         ProcessLoader process_loader = 11;
         ProcessUprobe process_uprobe = 12;
         ProcessThrottle process_throttle = 27;
+        ProcessLsm process_lsm = 28;
 
         Test test = 40000;
         RateLimitInfo rate_limit_info = 40001;
@@ -200,4 +209,6 @@ message GetEventsResponse {
     // aggregation_info contains information about aggregation results. This field
     // is set only for aggregated responses.
     AggregationInfo aggregation_info = 1002;
+    // Name of the cluster where this event was observed.
+    string cluster_name = 1003;
 }

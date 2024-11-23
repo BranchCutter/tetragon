@@ -24,12 +24,22 @@ struct {
 	__type(value, struct msg_generic_kprobe);
 } process_call_heap SEC(".maps");
 
+int generic_retkprobe_filter_arg(struct pt_regs *ctx);
+int generic_retkprobe_actions(struct pt_regs *ctx);
+int generic_retkprobe_output(struct pt_regs *ctx);
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
 	__uint(max_entries, 6);
 	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(__u32));
-} retkprobe_calls SEC(".maps");
+	__array(values, int(struct pt_regs *));
+} retkprobe_calls SEC(".maps") = {
+	.values = {
+		[3] = (void *)&generic_retkprobe_filter_arg,
+		[4] = (void *)&generic_retkprobe_actions,
+		[5] = (void *)&generic_retkprobe_output,
+	},
+};
 
 struct filter_map_value {
 	unsigned char buf[FILTER_SIZE];
@@ -132,8 +142,8 @@ BPF_KRETPROBE(generic_retkprobe_event, unsigned long ret)
 	 * 0x1000 should be maximum argument length, so masking
 	 * with 0x1fff is safe and verifier will be happy.
 	 */
-	asm volatile("%[size] &= 0x1fff;\n" ::[size] "+r"(size)
-		     :);
+	asm volatile("%[size] &= 0x1fff;\n"
+		     : [size] "+r"(size));
 
 	switch (do_copy) {
 	case char_buf:
@@ -171,7 +181,7 @@ BPF_KRETPROBE(generic_retkprobe_event, unsigned long ret)
 	return 1;
 }
 
-__attribute__((section("kprobe/3"), used)) int
+__attribute__((section("kprobe"), used)) int
 BPF_KRETPROBE(generic_retkprobe_filter_arg)
 {
 	return filter_read_arg(ctx, (struct bpf_map_def *)&process_call_heap,
@@ -181,13 +191,14 @@ BPF_KRETPROBE(generic_retkprobe_filter_arg)
 			       false);
 }
 
-__attribute__((section("kprobe/4"), used)) int
+__attribute__((section("kprobe"), used)) int
 BPF_KRETPROBE(generic_retkprobe_actions)
 {
-	return generic_actions(ctx, &maps);
+	generic_actions(ctx, &maps);
+	return 0;
 }
 
-__attribute__((section("kprobe/5"), used)) int
+__attribute__((section("kprobe"), used)) int
 BPF_KRETPROBE(generic_retkprobe_output)
 {
 	return generic_output(ctx, (struct bpf_map_def *)&process_call_heap, MSG_OP_GENERIC_KPROBE);

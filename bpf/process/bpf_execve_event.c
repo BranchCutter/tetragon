@@ -11,14 +11,26 @@
 #include "bpf_helpers.h"
 #include "bpf_rate.h"
 
+#include "policy_filter.h"
+
 char _license[] __attribute__((section("license"), used)) = "Dual BSD/GPL";
+
+#ifndef OVERRIDE_TAILCALL
+int execve_rate(void *ctx);
+int execve_send(void *ctx);
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
 	__uint(max_entries, 2);
 	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(__u32));
-} execve_calls SEC(".maps");
+	__array(values, int(void *));
+} execve_calls SEC(".maps") = {
+	.values = {
+		[0] = (void *)&execve_rate,
+		[1] = (void *)&execve_send,
+	},
+};
+#endif
 
 #include "data_event.h"
 
@@ -28,6 +40,17 @@ struct {
 	__type(key, __u32);
 	__type(value, struct msg_data);
 } data_heap SEC(".maps");
+
+/* tg_mbset_map holds a mapping from (binary) paths to a bitset of ids that it matches. The map is
+ * written by user-space and read in the exec hook to determine the bitset of ids of a binary that
+ * is executed.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, __u8[MATCH_BINARIES_PATH_MAX_LENGTH]);
+	__type(value, mbset_t);
+} tg_mbset_map SEC(".maps");
 
 FUNC_INLINE __u32
 read_args(void *ctx, struct msg_execve_event *event)
@@ -166,12 +189,31 @@ read_exe(struct task_struct *task, struct heap_exe *exe)
 {
 	struct file *file = BPF_CORE_READ(task, mm, exe_file);
 	struct path *path = __builtin_preserve_access_index(&file->f_path);
+	__u64 offset = 0;
+	__u64 revlen = STRING_POSTFIX_MAX_LENGTH - 1;
 
-	exe->len = BINARY_PATH_MAX_LEN;
-	exe->off = (char *)&exe->buf;
-	exe->off = __d_path_local(path, exe->off, (int *)&exe->len, (int *)&exe->error);
-	if (exe->len > 0)
-		exe->len = BINARY_PATH_MAX_LEN - exe->len;
+	// we need to walk the complete 4096 len dentry in order to have an accurate
+	// matching on the prefix operators, even if we only keep a subset of that
+	char *buffer;
+
+	buffer = d_path_local(path, (int *)&exe->len, (int *)&exe->error);
+	if (!buffer)
+		return 0;
+
+	if (exe->len > STRING_POSTFIX_MAX_LENGTH - 1)
+		offset = exe->len - (STRING_POSTFIX_MAX_LENGTH - 1);
+	else
+		revlen = exe->len;
+	// buffer used by d_path_local can contain up to MAX_BUF_LEN i.e. 4096 we
+	// only keep the first 255 chars for our needs (we sacrifice one char to the
+	// verifier for the > 0 check)
+	if (exe->len > BINARY_PATH_MAX_LEN - 1)
+		exe->len = BINARY_PATH_MAX_LEN - 1;
+	asm volatile("%[len] &= 0xff;\n"
+		     : [len] "+r"(exe->len));
+	probe_read(exe->buf, exe->len, buffer);
+	if (revlen < STRING_POSTFIX_MAX_LENGTH)
+		probe_read(exe->end, revlen, (char *)(buffer + offset));
 
 	return exe->len;
 }
@@ -224,8 +266,6 @@ event_execve(struct trace_event_raw_sched_process_exec *ctx)
 	event->common.ktime = p->ktime;
 	event->common.size = offsetof(struct msg_execve_event, process) + p->size;
 
-	BPF_CORE_READ_INTO(&event->kube.net_ns, task, nsproxy, net_ns, ns.inum);
-
 	get_current_subj_creds(&event->creds, task);
 	/**
 	 * Instead of showing the task owner, we want to display the effective
@@ -241,8 +281,8 @@ event_execve(struct trace_event_raw_sched_process_exec *ctx)
 	return 0;
 }
 
-__attribute__((section("tracepoint/0"), used)) int
-execve_rate(void *ctx)
+__attribute__((section("tracepoint"), used)) int
+execve_rate(void *ctx __arg_ctx)
 {
 	struct msg_execve_event *msg;
 	__u32 zero = 0;
@@ -256,6 +296,29 @@ execve_rate(void *ctx)
 	return 0;
 }
 
+/* update bitset mark */
+FUNC_INLINE
+void update_mb_bitset(struct binary *bin)
+{
+	__u64 *bitsetp;
+	struct execve_map_value *parent;
+
+	parent = event_find_parent();
+	if (parent) {
+		/* ->mb_bitset is used to track matchBinary matches to children (followChildren), so
+		 * here we propagate the parent value to the child.
+		 */
+		bin->mb_bitset = parent->bin.mb_bitset;
+	}
+
+	/* check the map and see if the binary path matches a binary
+	 * NB: only the In operator is supported for now
+	 */
+	bitsetp = map_lookup_elem(&tg_mbset_map, bin->path);
+	if (bitsetp)
+		bin->mb_bitset |= *bitsetp;
+}
+
 /**
  * execve_send() sends the collected execve event data.
  *
@@ -263,8 +326,8 @@ execve_rate(void *ctx)
  * is to update the pid execve_map entry to reflect the new execve event that
  * has already been collected, then send it to the perf buffer.
  */
-__attribute__((section("tracepoint/1"), used)) int
-execve_send(void *ctx)
+__attribute__((section("tracepoint"), used)) int
+execve_send(void *ctx __arg_ctx)
 {
 	struct msg_execve_event *event;
 	struct execve_map_value *curr;
@@ -328,9 +391,14 @@ execve_send(void *ctx)
 #ifdef __LARGE_BPF_PROG
 		// read from proc exe stored at execve time
 		if (event->exe.len <= BINARY_PATH_MAX_LEN) {
-			curr->bin.path_length = probe_read(curr->bin.path, event->exe.len, event->exe.off);
+			curr->bin.path_length = probe_read(curr->bin.path, event->exe.len, event->exe.buf);
 			if (curr->bin.path_length == 0)
 				curr->bin.path_length = event->exe.len;
+			__u64 revlen = event->exe.len;
+
+			if (event->exe.len > STRING_POSTFIX_MAX_LENGTH - 1)
+				revlen = STRING_POSTFIX_MAX_LENGTH - 1;
+			probe_read(curr->bin.end, revlen, event->exe.end);
 		}
 #else
 		// reuse p->args first string that contains the filename, this can't be
@@ -342,6 +410,8 @@ execve_send(void *ctx)
 			curr->bin.path_length--;
 		}
 #endif
+
+		update_mb_bitset(&curr->bin);
 	}
 
 	event->common.flags = 0;

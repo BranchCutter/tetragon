@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -23,12 +22,12 @@ import (
 	"github.com/cilium/tetragon/pkg/logger"
 	"github.com/cilium/tetragon/pkg/metrics/errormetrics"
 	"github.com/cilium/tetragon/pkg/metrics/opcodemetrics"
-	"github.com/cilium/tetragon/pkg/metrics/ringbufmetrics"
-	"github.com/cilium/tetragon/pkg/metrics/ringbufqueuemetrics"
 	"github.com/cilium/tetragon/pkg/option"
 	"github.com/cilium/tetragon/pkg/reader/notify"
 	"github.com/cilium/tetragon/pkg/sensors"
 	"github.com/cilium/tetragon/pkg/sensors/config/confmap"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/sirupsen/logrus"
 )
@@ -126,8 +125,6 @@ func (k *Observer) receiveEvent(data []byte) {
 	op, events, err := HandlePerfData(data)
 	opcodemetrics.OpTotalInc(ops.OpCode(op))
 	if err != nil {
-		// Increment error metrics
-		errormetrics.ErrorTotalInc(errormetrics.HandlerError)
 		errormetrics.HandlerErrorsInc(ops.OpCode(op), err.kind)
 		switch err.kind {
 		case errormetrics.HandlePerfUnknownOp:
@@ -241,8 +238,8 @@ func (k *Observer) RunEvents(stopCtx context.Context, ready func()) error {
 			if err != nil {
 				// NOTE(JM and Djalal): count and log errors while excluding the stopping context
 				if stopCtx.Err() == nil {
-					errorCnt := atomic.AddUint64(&k.errorCntr, 1)
-					ringbufmetrics.PerfEventErrors.Inc()
+					RingbufErrors.Inc()
+					errorCnt := getCounterValue(RingbufErrors)
 					k.log.WithField("errors", errorCnt).WithError(err).Warn("Reading bpf events failed")
 				}
 			} else {
@@ -251,15 +248,13 @@ func (k *Observer) RunEvents(stopCtx context.Context, ready func()) error {
 					case eventsQueue <- &record:
 					default:
 						// eventsQueue channel is full, drop the event
-						ringbufqueuemetrics.Lost.Inc()
+						queueLost.Inc()
 					}
-					k.recvCntr++
-					ringbufmetrics.PerfEventReceived.Inc()
+					RingbufReceived.Inc()
 				}
 
 				if record.LostSamples > 0 {
-					atomic.AddUint64(&k.lostCntr, uint64(record.LostSamples))
-					ringbufmetrics.PerfEventLost.Add(float64(record.LostSamples))
+					RingbufLost.Add(float64(record.LostSamples))
 				}
 			}
 		}
@@ -273,7 +268,7 @@ func (k *Observer) RunEvents(stopCtx context.Context, ready func()) error {
 			select {
 			case event := <-eventsQueue:
 				k.receiveEvent(event.RawSample)
-				ringbufqueuemetrics.Received.Inc()
+				queueReceived.Inc()
 			case <-stopCtx.Done():
 				k.log.WithError(stopCtx.Err()).Infof("Listening for events completed.")
 				k.log.Debugf("Unprocessed events in RB queue: %d", len(eventsQueue))
@@ -302,9 +297,9 @@ type Observer struct {
 	listeners  map[Listener]struct{}
 	PerfConfig *bpf.PerfEventConfig
 	/* Statistics */
-	lostCntr   uint64 // atomic
-	errorCntr  uint64 // atomic
-	recvCntr   uint64 // atomic
+	lostCntr   prometheus.Counter
+	errorCntr  prometheus.Counter
+	recvCntr   prometheus.Counter
 	filterPass uint64
 	filterDrop uint64
 	/* Filters */
@@ -336,18 +331,22 @@ func (k *Observer) UpdateRuntimeConf(bpfDir string) error {
 
 // Start starts the observer
 func (k *Observer) Start(ctx context.Context) error {
+	return k.StartReady(ctx, func() {})
+}
+
+func (k *Observer) StartReady(ctx context.Context, ready func()) error {
 	k.PerfConfig = bpf.DefaultPerfEventConfig()
 
 	var err error
-	if err = k.RunEvents(ctx, func() {}); err != nil {
+	if err = k.RunEvents(ctx, ready); err != nil {
 		return fmt.Errorf("tetragon, aborting runtime error: %w", err)
 	}
 	return nil
 }
 
 // InitSensorManager starts the sensor controller
-func (k *Observer) InitSensorManager(waitChan chan struct{}) error {
-	mgr, err := sensors.StartSensorManager(option.Config.BpfDir, waitChan)
+func (k *Observer) InitSensorManager() error {
+	mgr, err := sensors.StartSensorManager(option.Config.BpfDir)
 	if err != nil {
 		return err
 	}
@@ -357,6 +356,9 @@ func (k *Observer) InitSensorManager(waitChan chan struct{}) error {
 func NewObserver() *Observer {
 	o := &Observer{
 		listeners: make(map[Listener]struct{}),
+		lostCntr:  RingbufLost,
+		errorCntr: RingbufErrors,
+		recvCntr:  RingbufReceived,
 		log:       logger.GetLogger(),
 	}
 	observerList = append(observerList, o)
@@ -373,15 +375,15 @@ func (k *Observer) Remove() {
 }
 
 func (k *Observer) ReadLostEvents() uint64 {
-	return atomic.LoadUint64(&k.lostCntr)
+	return getCounterValue(k.lostCntr)
 }
 
 func (k *Observer) ReadErrorEvents() uint64 {
-	return atomic.LoadUint64(&k.errorCntr)
+	return getCounterValue(k.errorCntr)
 }
 
 func (k *Observer) ReadReceivedEvents() uint64 {
-	return atomic.LoadUint64(&k.recvCntr)
+	return getCounterValue(k.recvCntr)
 }
 
 func (k *Observer) PrintStats() {
@@ -438,4 +440,10 @@ func (k *Observer) LogPinnedBpf(observerDir string) {
 			"pinned-bpf": fmt.Sprintf("[%s]", strings.Join(res, " ")),
 		}).Info("BPF: found active BPF resources")
 	}
+}
+
+func getCounterValue(counter prometheus.Counter) uint64 {
+	var d dto.Metric
+	counter.Write(&d)
+	return uint64(*d.Counter.Value)
 }

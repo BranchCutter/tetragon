@@ -28,10 +28,10 @@ jobs:
     steps:
       # https://github.com/docker/setup-buildx-action
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d70bba72b1f3fd22344832f00baa16ece964efeb # v3.3.0
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.6.1
 
       - name: Checkout Source Code
-        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Getting version tag
         id: tag
@@ -59,7 +59,7 @@ jobs:
 
       # Cache tarball releases for later
       - name: Save tetragon-${{ steps.tag.outputs.tag }}-${{ matrix.arch }}.tar.gz Tarball
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
         with:
           name: tetragon-${{ steps.tag.outputs.tag }}-${{ matrix.arch }}
           path: ${{ matrix.upload_path }}
@@ -76,7 +76,7 @@ jobs:
             match_arch: x86-64
             cross_compile: no
             upload_path: upload/
-          - os: actuated-arm64-4cpu-8gb
+          - os: ubuntu-22.04-arm64
             arch: arm64
             match_arch: arm64
             cross_compile: yes
@@ -84,14 +84,14 @@ jobs:
 
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Getting version tag
         id: tag
         run: echo "tag=$(make version)" >> $GITHUB_OUTPUT
 
       - name: Retrieve tetragon-${{ steps.tag.outputs.tag }}-${{ matrix.arch }}.tar.gz
-        uses: actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3b2e # v4.1.7
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           name: tetragon-${{ steps.tag.outputs.tag }}-${{ matrix.arch }}
           path: ${{ matrix.upload_path }}
@@ -129,14 +129,20 @@ jobs:
         run: sudo journalctl -b -u tetragon --no-pager
 
       - name: Test Tetragon
-        run: |
-          sudo tetra status
-          sudo tetra tracingpolicy list | grep bpf -
-          sudo tetra bugtool
-          test $(stat -c %a /var/run/tetragon/tetragon.sock) -eq "660"
-          sudo tetra tracingpolicy add examples/tracingpolicy/tcp-connect.yaml
-          sudo tetra tracingpolicy list | grep connect -
-          sudo grep "tetra" /var/log/tetragon/tetragon.log
+        uses: nick-fields/retry@7152eba30c6575329ac0576536151aca5a72780e # v3.0.0
+        with:
+          timeout_seconds: 30
+          max_attempts: 5
+          retry_wait_seconds: 5
+          retry_on: error
+          command: |
+            sudo tetra status
+            test $(stat -c %a /var/run/tetragon/tetragon.sock) -eq "660"
+            sudo tetra bugtool
+            sudo tetra tracingpolicy list | grep bpf -
+            sudo tetra tracingpolicy add examples/tracingpolicy/tcp-connect.yaml
+            sudo tetra tracingpolicy list | grep connect -
+            sudo grep "tetra" /var/log/tetragon/tetragon.log
 
       - name: Setup Tetragon with a different tracing-policy-dir
         run: |

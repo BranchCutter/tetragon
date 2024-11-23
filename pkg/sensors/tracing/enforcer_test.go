@@ -10,6 +10,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/cilium/tetragon/api/v1/tetragon"
 	"github.com/cilium/tetragon/api/v1/tetragon/codegen/eventchecker"
@@ -24,11 +25,13 @@ import (
 	"github.com/cilium/tetragon/pkg/observer/observertesthelper"
 	"github.com/cilium/tetragon/pkg/option"
 	"github.com/cilium/tetragon/pkg/policyfilter"
-	"github.com/cilium/tetragon/pkg/sensors/base"
+	"github.com/cilium/tetragon/pkg/sensors"
+	"github.com/cilium/tetragon/pkg/syscallinfo"
 	"github.com/cilium/tetragon/pkg/testutils"
 	tus "github.com/cilium/tetragon/pkg/testutils/sensors"
 	"github.com/cilium/tetragon/pkg/tracingpolicy"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
@@ -41,10 +44,21 @@ func testEnforcerCheckSkip(t *testing.T) {
 	}
 }
 
+type cmdChecker struct {
+	cmd     string
+	checkFn func(t *testing.T, err error, rc int)
+}
+
+func newCmdChecker(cmd string, checkFn func(t *testing.T, err error, rc int)) cmdChecker {
+	return cmdChecker{
+		cmd:     cmd,
+		checkFn: checkFn,
+	}
+}
+
 func testEnforcer(t *testing.T, configHook string,
-	test string, test2 string,
 	checker *eventchecker.UnorderedEventChecker,
-	checkerFunc func(err error, rc int)) {
+	cmds ...cmdChecker) {
 
 	var doneWG, readyWG sync.WaitGroup
 	defer doneWG.Wait()
@@ -64,16 +78,10 @@ func testEnforcer(t *testing.T, configHook string,
 	observertesthelper.LoopEvents(ctx, t, &doneWG, &readyWG, obs)
 	readyWG.Wait()
 
-	cmd := exec.Command(test)
-	err = cmd.Run()
-
-	checkerFunc(err, cmd.ProcessState.ExitCode())
-
-	if test2 != "" {
-		cmd := exec.Command(test2)
+	for _, cc := range cmds {
+		cmd := exec.Command(cc.cmd)
 		err = cmd.Run()
-
-		checkerFunc(err, cmd.ProcessState.ExitCode())
+		cc.checkFn(t, err, cmd.ProcessState.ExitCode())
 	}
 
 	err = jsonchecker.JsonTestCheck(t, checker)
@@ -95,13 +103,13 @@ func TestEnforcerOverride(t *testing.T) {
 		WithArgs(ec.NewKprobeArgumentListMatcher().
 			WithOperator(lc.Ordered).
 			WithValues(
-				ec.NewKprobeArgumentChecker().WithSizeArg(unix.SYS_GETCPU),
+				ec.NewKprobeArgumentChecker().WithSyscallId(mkSysIDChecker(t, unix.SYS_GETCPU)),
 			)).
 		WithAction(tetragon.KprobeAction_KPROBE_ACTION_NOTIFYENFORCER)
 
 	checker := ec.NewUnorderedEventChecker(tpChecker)
 
-	checkerFunc := func(_ error, rc int) {
+	checkerFunc := func(t *testing.T, _ error, rc int) {
 		if rc != int(syscall.EEXIST) {
 			t.Fatalf("Wrong exit code %d expected %d", rc, int(syscall.EEXIST))
 		}
@@ -117,12 +125,12 @@ func TestEnforcerOverride(t *testing.T) {
 				t.Skip("no multi-kprobe support")
 			}
 			yaml := builder().WithOverrideReturn().WithMultiKprobe().MustYAML()
-			testEnforcer(t, yaml, test, "", checker, checkerFunc)
+			testEnforcer(t, yaml, checker, newCmdChecker(test, checkerFunc))
 		})
 
 		t.Run("kprobe (no multi)", func(t *testing.T) {
 			yaml := builder().WithOverrideReturn().WithoutMultiKprobe().MustYAML()
-			testEnforcer(t, yaml, test, "", checker, checkerFunc)
+			testEnforcer(t, yaml, checker, newCmdChecker(test, checkerFunc))
 		})
 	})
 	t.Run("fmod_ret", func(t *testing.T) {
@@ -130,7 +138,7 @@ func TestEnforcerOverride(t *testing.T) {
 			t.Skip("fmod_ret not supported")
 		}
 		yaml := builder().WithFmodRet().MustYAML()
-		testEnforcer(t, yaml, test, "", checker, checkerFunc)
+		testEnforcer(t, yaml, checker, newCmdChecker(test, checkerFunc))
 	})
 }
 
@@ -149,13 +157,13 @@ func TestEnforcerOverrideManySyscalls(t *testing.T) {
 		WithArgs(ec.NewKprobeArgumentListMatcher().
 			WithOperator(lc.Ordered).
 			WithValues(
-				ec.NewKprobeArgumentChecker().WithSizeArg(unix.SYS_GETCPU),
+				ec.NewKprobeArgumentChecker().WithSyscallId(mkSysIDChecker(t, unix.SYS_GETCPU)),
 			)).
 		WithAction(tetragon.KprobeAction_KPROBE_ACTION_NOTIFYENFORCER)
 
 	checker := ec.NewUnorderedEventChecker(tpChecker)
 
-	checkerFunc := func(_ error, rc int) {
+	checkerFunc := func(t *testing.T, _ error, rc int) {
 		if rc != int(syscall.EEXIST) {
 			t.Fatalf("Wrong exit code %d expected %d", rc, int(syscall.EEXIST))
 		}
@@ -171,12 +179,12 @@ func TestEnforcerOverrideManySyscalls(t *testing.T) {
 				t.Skip("no multi-kprobe support")
 			}
 			yaml := builder().WithOverrideReturn().WithMultiKprobe().MustYAML()
-			testEnforcer(t, yaml, test, "", checker, checkerFunc)
+			testEnforcer(t, yaml, checker, newCmdChecker(test, checkerFunc))
 		})
 
 		t.Run("kprobe (no multi)", func(t *testing.T) {
 			yaml := builder().WithOverrideReturn().WithoutMultiKprobe().MustYAML()
-			testEnforcer(t, yaml, test, "", checker, checkerFunc)
+			testEnforcer(t, yaml, checker, newCmdChecker(test, checkerFunc))
 		})
 	})
 	t.Run("fmod_ret", func(t *testing.T) {
@@ -184,8 +192,14 @@ func TestEnforcerOverrideManySyscalls(t *testing.T) {
 			t.Skip("fmod_ret not supported")
 		}
 		yaml := builder().WithFmodRet().MustYAML()
-		testEnforcer(t, yaml, test, "", checker, checkerFunc)
+		testEnforcer(t, yaml, checker, newCmdChecker(test, checkerFunc))
 	})
+}
+
+func mkSysIDChecker(t *testing.T, id uint64) *ec.SyscallIdChecker {
+	abi, err := syscallinfo.DefaultABI()
+	require.NoError(t, err)
+	return ec.NewSyscallIdChecker().WithId(uint32(id)).WithAbi(sm.Full(abi))
 }
 
 func TestEnforcerSignal(t *testing.T) {
@@ -197,13 +211,13 @@ func TestEnforcerSignal(t *testing.T) {
 		WithArgs(ec.NewKprobeArgumentListMatcher().
 			WithOperator(lc.Ordered).
 			WithValues(
-				ec.NewKprobeArgumentChecker().WithSizeArg(syscall.SYS_PRCTL),
+				ec.NewKprobeArgumentChecker().WithSyscallId(mkSysIDChecker(t, syscall.SYS_PRCTL)),
 			)).
 		WithAction(tetragon.KprobeAction_KPROBE_ACTION_NOTIFYENFORCER)
 
 	checker := ec.NewUnorderedEventChecker(tpChecker)
 
-	checkerFunc := func(err error, _ int) {
+	checkerFunc := func(t *testing.T, err error, _ int) {
 		if err == nil || err.Error() != "signal: killed" {
 			t.Fatalf("Wrong error '%v' expected 'killed'", err)
 		}
@@ -226,12 +240,12 @@ func TestEnforcerSignal(t *testing.T) {
 		}
 
 		yaml := builder().WithMultiKprobe().MustYAML()
-		testEnforcer(t, yaml, test, "", checker, checkerFunc)
+		testEnforcer(t, yaml, checker, newCmdChecker(test, checkerFunc))
 	})
 
 	t.Run("kprobe (no multi)", func(t *testing.T) {
 		yaml := builder().WithoutMultiKprobe().MustYAML()
-		testEnforcer(t, yaml, test, "", checker, checkerFunc)
+		testEnforcer(t, yaml, checker, newCmdChecker(test, checkerFunc))
 	})
 
 }
@@ -294,6 +308,22 @@ func testSecurity(t *testing.T, tracingPolicy, tempFile string) {
 	}
 }
 
+func directWriteTempFile(t *testing.T) string {
+	// We can't use t.TempDir as it writes into /tmp by default.
+	// The direct-write-tester.c program opens and writes using the O_DIRECT
+	// flag that is unsupported and return EINVAL on tmpfs, while it works on a
+	// disk based fs. Recently, the base image used by vmtests started to switch
+	// /tmp from the disk to tmpfs which made that test fail.
+	tempFile, err := os.CreateTemp("/var/tmp", "tetragon-testfile-*")
+	if err != nil {
+		t.Fatalf("failed to create temporary file for tester prog: %s", err)
+	}
+	t.Cleanup(func() {
+		os.Remove(tempFile.Name())
+	})
+	return tempFile.Name()
+}
+
 // Testing the ability to kill the process before it executes the syscall,
 // in this case direct pwrite syscall.
 // Standard Sigkill action kills executed from sys_pwrite probe kills the
@@ -323,7 +353,7 @@ func TestEnforcerSecuritySigKill(t *testing.T) {
 		t.Skip("Older kernels do not support matchArgs for more than one arguments")
 	}
 
-	tempFile := t.TempDir() + "/test"
+	tempFile := directWriteTempFile(t)
 
 	tracingPolicy := `
 apiVersion: cilium.io/v1alpha1
@@ -410,7 +440,7 @@ func TestEnforcerSecurityNotifyEnforcer(t *testing.T) {
 		t.Skip("Older kernels do not support matchArgs for more than one arguments")
 	}
 
-	tempFile := t.TempDir() + "/test"
+	tempFile := directWriteTempFile(t)
 
 	tracingPolicy := `
 apiVersion: cilium.io/v1alpha1
@@ -593,7 +623,7 @@ spec:
 	}
 
 	option.Config.HubbleLib = tus.Conf().TetragonLib
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 
 	sensor1, err := gEnforcerPolicy.PolicyHandler(policy1, policyfilter.NoFilterID)
 	assert.NoError(t, err)
@@ -640,10 +670,13 @@ spec:
 	}
 
 	// Unload policy 1 (watch 0xffff)
-	sensor1.Unload()
-	sensor2.Unload()
+	sensor1.Unload(true)
+	sensor2.Unload(true)
 
 	t.Logf("Unloaded policy 1\n")
+
+	// bpf pinned links removal is asynchronous, we need to wait to be sure it's gone
+	time.Sleep(2 * time.Second)
 
 	// 'enforcer-tester 0xffff' should NOT get killed now
 	cmd = exec.Command(testBin, "0xffff")
@@ -662,10 +695,13 @@ spec:
 	}
 
 	// Unload policy 2 (watch 0xfffe)
-	sensor3.Unload()
-	sensor4.Unload()
+	sensor3.Unload(true)
+	sensor4.Unload(true)
 
 	t.Logf("Unloaded policy 2\n")
+
+	// bpf pinned links removal is asynchronous, we need to wait to be sure it's gone
+	time.Sleep(2 * time.Second)
 
 	// 'enforcer-tester 0xfffe' should NOT get killed now
 	cmd = exec.Command(testBin, "0xfffe")
@@ -674,4 +710,236 @@ spec:
 	if err == nil || err.Error() != "exit status 22" {
 		t.Fatalf("Wrong error '%v' expected 'exit status 22'", err)
 	}
+}
+
+// We test following scenario:
+// - load enforcement policy
+// - 1st run of test binary, make sure enforcement policy is triggered
+// - simulate tetragon exit (with KeepSensorsOnExit)
+// - 2nd run of test binary, make sure enforcement policy is triggered
+// - remove bpffs directory
+// - 3rd run of test binary, no enforcement
+func testEnforcerPersistentKeep(t *testing.T, builder func() *EnforcerSpecBuilder, expected, test string) {
+	testEnforcerCheckSkip(t)
+
+	if !bpf.HasLinkPin() {
+		t.Skip("skipping persistent enforcer test, link pin is not available")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	option.Config.KeepSensorsOnExit = true
+	defer func() { option.Config.KeepSensorsOnExit = false }()
+
+	tus.LoadInitialSensor(t)
+	path := bpf.MapPrefixPath()
+	mgr, err := sensors.StartSensorManager(path)
+	assert.NoError(t, err)
+
+	run := func(idx int, exp string) {
+		cmd := exec.Command(test, "0xfffe")
+		err := cmd.Run()
+
+		t.Logf("Run %s: %v\n", cmd, err)
+		if err == nil || err.Error() != exp {
+			t.Fatalf("run %d: Wrong error '%v' expected '%s'", idx, err, exp)
+		}
+	}
+
+	tp, err := builder().WithoutMultiKprobe().Build()
+	assert.NoError(t, err)
+
+	err = mgr.AddTracingPolicy(ctx, tp)
+	assert.NoError(t, err)
+
+	// first run - sensors are loaded, we should get kill/override
+	run(1, expected)
+
+	// Remove all servers - simulate tetragon exit with KeepSensorsOnExit
+	mgr.RemoveAllSensors(ctx)
+
+	// bpf pinned links removal is asynchronous, we need to wait to be sure it's gone
+	// (if for some reason it's gone)
+	time.Sleep(2 * time.Second)
+
+	// second run - sensors are unloaded, but pins stay, we should get kill/override
+	run(2, expected)
+
+	// ... and finally get rid of pinned progs/maps/links
+	os.RemoveAll(bpf.MapPrefixPath())
+
+	// bpf pinned links removal is asynchronous, we need to wait to be sure it's gone
+	time.Sleep(2 * time.Second)
+
+	// third run - sensors are unloaded, map dir is removed, we should get no enforcement
+	run(3, "exit status 22")
+}
+
+// We test following scenario:
+// - load enforcement policy
+// - 1st run of test binary, make sure enforcement policy is triggered
+// - simulate tetragon exit (normal, WITHOUT KeepSensorsOnExit)
+// - 2nd run of test binary, no enforcement
+func testEnforcerPersistentNoKeep(t *testing.T, builder func() *EnforcerSpecBuilder, expected, test string) {
+	testEnforcerCheckSkip(t)
+
+	if !bpf.HasLinkPin() {
+		t.Skip("skipping persistent enforcer test, link pin is not available")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// option.Config.KeepSensorsOnExit is false
+
+	tus.LoadInitialSensor(t)
+	path := bpf.MapPrefixPath()
+	mgr, err := sensors.StartSensorManager(path)
+	assert.NoError(t, err)
+
+	run := func(idx int, exp string) {
+		cmd := exec.Command(test, "0xfffe")
+		err := cmd.Run()
+
+		t.Logf("Run %s: %v\n", cmd, err)
+		if err == nil || err.Error() != exp {
+			t.Fatalf("run %d: Wrong error '%v' expected '%s'", idx, err, exp)
+		}
+	}
+
+	tp, err := builder().WithoutMultiKprobe().Build()
+	assert.NoError(t, err)
+
+	err = mgr.AddTracingPolicy(ctx, tp)
+	assert.NoError(t, err)
+
+	// first run - sensors are loaded, we should get kill/override
+	run(1, expected)
+
+	// Remove all servers - simulate tetragon exit WITHOUT KeepSensorsOnExit
+	mgr.RemoveAllSensors(ctx)
+
+	// bpf pinned links removal is asynchronous, we need to wait to be sure it's gone
+	time.Sleep(2 * time.Second)
+
+	// second run - sensors are unloaded, we should get no enforcement
+	run(2, "exit status 22")
+}
+
+// We test following scenario:
+// - load enforcement policy
+// - 1st run of test binary, make sure enforcement policy is triggered
+// - disable enforcement policy via sensor manager
+// - 2nd run of test binary, no enforcement
+// - enable enforcement policy via sensor manager
+// - 3rd run of test binary, make sure enforcement policy is triggered
+// - remove enforcement policy via sensor manager
+// - 4th run of test binary, no enforcement
+func testEnforcerPersistentUnload(t *testing.T, builder func() *EnforcerSpecBuilder, expected, test string) {
+	testEnforcerCheckSkip(t)
+
+	if !bpf.HasLinkPin() {
+		t.Skip("skipping persistent enforcer test, link pin is not available")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	option.Config.KeepSensorsOnExit = true
+	defer func() { option.Config.KeepSensorsOnExit = false }()
+
+	tus.LoadInitialSensor(t)
+	path := bpf.MapPrefixPath()
+	mgr, err := sensors.StartSensorManager(path)
+	assert.NoError(t, err)
+
+	run := func(idx int, exp string) {
+		cmd := exec.Command(test, "0xfffe")
+		err := cmd.Run()
+
+		t.Logf("Run %d: '%s' (%v)\n", idx, cmd, err)
+		if err == nil || err.Error() != exp {
+			t.Fatalf("run %d: Wrong error '%v' expected '%s'", idx, err, exp)
+		}
+	}
+
+	tp, err := builder().WithoutMultiKprobe().Build()
+	assert.NoError(t, err)
+
+	err = mgr.AddTracingPolicy(ctx, tp)
+	assert.NoError(t, err)
+
+	// first run - sensors are loaded, we should get kill/override
+	run(1, expected)
+
+	// disable the policy and we should get rid of the enforcement
+	err = mgr.DisableTracingPolicy(ctx, tp.TpName(), "")
+	assert.NoError(t, err)
+
+	// bpf pinned links removal is asynchronous, we need to wait to be sure it's gone
+	time.Sleep(2 * time.Second)
+
+	// second run - sensors are unloaded, map dir is removed, we should get no enforcement
+	run(2, "exit status 22")
+
+	// enable the policy and we should get the enforcement
+	err = mgr.EnableTracingPolicy(ctx, tp.TpName(), "")
+	assert.NoError(t, err)
+
+	// third run - sensors are loaded, we should get kill/override
+	run(3, expected)
+
+	// remove the policy and we should get rid of the enforcement
+	err = mgr.DeleteTracingPolicy(ctx, tp.TpName(), "")
+	assert.NoError(t, err)
+
+	// bpf pinned links removal is asynchronous, we need to wait to be sure it's gone
+	time.Sleep(2 * time.Second)
+
+	// forth run - sensors are unloaded, map dir is removed, we should get no enforcement
+	run(4, "exit status 22")
+}
+
+func TestEnforcerPersistentOverride(t *testing.T) {
+	test := testutils.RepoRootPath("contrib/tester-progs/enforcer-tester")
+
+	builder := func() *EnforcerSpecBuilder {
+		return NewEnforcerSpecBuilder("enforcer-signal").
+			WithSyscallList("sys_prctl").
+			WithMatchBinaries(test).
+			WithOverrideValue(-17) // EEXIST
+	}
+
+	t.Run("persistent-override-keep", func(t *testing.T) {
+		testEnforcerPersistentKeep(t, builder, "exit status 17", test)
+	})
+	t.Run("persistent-override-no-keep", func(t *testing.T) {
+		testEnforcerPersistentNoKeep(t, builder, "exit status 17", test)
+	})
+	t.Run("persistent-override-extra", func(t *testing.T) {
+		testEnforcerPersistentUnload(t, builder, "exit status 17", test)
+	})
+}
+
+func TestEnforcerPersistentKill(t *testing.T) {
+
+	test := testutils.RepoRootPath("contrib/tester-progs/enforcer-tester")
+
+	builder := func() *EnforcerSpecBuilder {
+		return NewEnforcerSpecBuilder("enforcer-signal").
+			WithSyscallList("sys_prctl").
+			WithMatchBinaries(test).
+			WithKill(9) // SigKill
+	}
+
+	t.Run("persistent-kill-keep", func(t *testing.T) {
+		testEnforcerPersistentKeep(t, builder, "signal: killed", test)
+	})
+	t.Run("persistent-kill-no-keep", func(t *testing.T) {
+		testEnforcerPersistentNoKeep(t, builder, "signal: killed", test)
+	})
+	t.Run("persistent-kill-extra", func(t *testing.T) {
+		testEnforcerPersistentUnload(t, builder, "signal: killed", test)
+	})
 }

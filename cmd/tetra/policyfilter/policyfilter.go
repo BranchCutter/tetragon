@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/cilium/tetragon/cmd/tetra/dump"
+	"github.com/cilium/tetragon/cmd/tetra/debug"
 	"github.com/cilium/tetragon/pkg/cgroups"
 	"github.com/cilium/tetragon/pkg/defaults"
 	"github.com/cilium/tetragon/pkg/logger"
@@ -28,8 +28,25 @@ func New() *cobra.Command {
 		dumpCmd(),
 		addCommand(),
 		cgroupGetIDCommand(),
+		dumpDebugCmd(),
 	)
 
+	return ret
+}
+
+func dumpDebugCmd() *cobra.Command {
+	mapFname := filepath.Join(defaults.DefaultMapRoot, defaults.DefaultMapPrefix, policyfilter.CgrpNsMapName)
+	ret := &cobra.Command{
+		Use:   "dumpcgrp",
+		Short: "dump cgroup ID to namespace state",
+		Args:  cobra.ExactArgs(0),
+		Run: func(_ *cobra.Command, _ []string) {
+			debug.NamespaceState(mapFname)
+		},
+	}
+
+	flags := ret.Flags()
+	flags.StringVar(&mapFname, "map-fname", mapFname, "policyfilter map filename")
 	return ret
 }
 
@@ -60,7 +77,7 @@ func dumpCmd() *cobra.Command {
 		Short: "dump policyfilter state",
 		Args:  cobra.ExactArgs(0),
 		Run: func(_ *cobra.Command, _ []string) {
-			dump.PolicyfilterState(mapFname)
+			debug.PolicyfilterState(mapFname)
 		},
 	}
 

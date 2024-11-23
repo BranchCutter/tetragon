@@ -44,11 +44,11 @@ import (
 
 type tlog struct {
 	*testing.T
-	Log *logrus.Logger
+	Logger *logrus.Logger
 }
 
 func (tl tlog) Write(p []byte) (n int, err error) {
-	tl.Logf((string)(p))
+	tl.Log(string(p))
 	return len(p), nil
 }
 
@@ -114,16 +114,16 @@ func (ts *testState) eventHandler(m *state) cache.ResourceEventHandler {
 	h := m.getPodEventHandlers()
 	return cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			ts.cbAdds.Add(1)
 			h.OnAdd(obj, false)
+			ts.cbAdds.Add(1)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			ts.cbUpds.Add(1)
 			h.OnUpdate(oldObj, newObj)
+			ts.cbUpds.Add(1)
 		},
 		DeleteFunc: func(obj interface{}) {
-			ts.cbDels.Add(1)
 			h.OnDelete(obj)
+			ts.cbDels.Add(1)
 		},
 	}
 }
@@ -706,7 +706,7 @@ func TestK8s(t *testing.T) {
 
 	// NB: using testutils.CaptureLog causes import cycle
 	log := logger.GetLogger().(*logrus.Logger)
-	lc := &tlog{T: t, Log: log}
+	lc := &tlog{T: t, Logger: log}
 	log.SetOutput(lc)
 
 	oldEnablePolicyFilterValue := option.Config.EnablePolicyFilter

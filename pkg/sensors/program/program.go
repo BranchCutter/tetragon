@@ -3,22 +3,51 @@
 
 package program
 
+// Program sysfs hierarchy
+//
+// Each program is part of policy and sensor and defines PinName
+// which determine its path in sysfs hierarchy, like:
+//
+//   /sys/fs/bpf/tetragon/policy/sensor/program/prog
+//
+// which broken down means:
+//
+//   /sys/fs/bpf/tetragon
+//     - bpf (map) directory
+//
+//   policy/sensor
+//     - defined by sensor.Policy/sensor.Name
+//
+//   program
+//     - defined by program.PinName
+//
+//   prog
+//     - fixed file name (prog_override for override program)
+//
+//  The program.PinPath field hods following portion of the path:
+//     policy/sensor/program
+//  and is initialized when the sensor is loaded.
+
 import (
 	"fmt"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
+	"github.com/cilium/ebpf/link"
+	"github.com/cilium/tetragon/pkg/bpf"
 	"github.com/cilium/tetragon/pkg/sensors/unloader"
 )
 
 func Builder(
-	objFile, attach, label, pinFile string,
+	objFile, attach, label, pinName string,
 	ty string,
 ) *Program {
 	return &Program{
 		Name:       objFile,
 		Attach:     attach,
 		Label:      label,
-		PinPath:    pinFile,
+		PinPath:    "",
+		PinName:    pinName,
 		RetProbe:   false,
 		ErrorFatal: true,
 		Override:   false,
@@ -28,6 +57,9 @@ func Builder(
 		MapLoad:    nil,
 		unloader:   nil,
 		PinMap:     make(map[string]*Map),
+		Link:       nil,
+		Prog:       nil,
+		Policy:     "",
 	}
 }
 
@@ -38,7 +70,7 @@ func GetProgramInfo(l *Program) (program, label, prog string) {
 type MapLoad struct {
 	Index uint32
 	Name  string
-	Load  func(m *ebpf.Map, index uint32) error
+	Load  func(m *ebpf.Map, pinPathPrefix string, index uint32) error
 }
 
 type MultiKprobeAttachData struct {
@@ -73,6 +105,8 @@ type Program struct {
 	// PinPath is the pinned path to this program. Note this is a relative path
 	// based on the BPF directory FGS is running under.
 	PinPath string
+	// PinName
+	PinName string
 
 	// RetProbe indicates whether a kprobe is a kretprobe.
 	RetProbe bool
@@ -97,6 +131,7 @@ type Program struct {
 	// AttachData represents specific data for attaching probe
 	AttachData interface{}
 
+	// Functions to call after loading maps to populate them
 	MapLoad []*MapLoad
 
 	// unloader for the program. nil if not loaded.
@@ -107,6 +142,25 @@ type Program struct {
 
 	// available when program.KeepCollection is true
 	LC *LoadedCollection
+
+	RewriteConstants map[string]interface{}
+
+	// Type information used for CO-RE relocations.
+	KernelTypes *btf.Spec
+
+	// Tail call prefix/map
+	TcPrefix string
+	TcMap    *Map
+
+	Link link.Link
+	Prog *ebpf.Program
+
+	// policy name the program belongs to
+	Policy string
+
+	// Information of all maps used and loaded by this program by map ID. This
+	// is populated after load and used for map memlock accounting.
+	LoadedMapsInfo map[int]bpf.ExtendedMapInfo
 }
 
 func (p *Program) SetRetProbe(ret bool) *Program {
@@ -124,20 +178,36 @@ func (p *Program) SetAttachData(d interface{}) *Program {
 	return p
 }
 
-func (p *Program) Unload() error {
+func (p *Program) SetTailCall(prefix string, m *Map) *Program {
+	p.TcPrefix = prefix
+	p.TcMap = m
+	return p
+}
+
+func (p *Program) SetPolicy(policy string) *Program {
+	p.Policy = policy
+	return p
+}
+
+func (p *Program) Unload(unpin bool) error {
 	if p.unloader == nil {
 		return nil
 	}
-	if err := p.unloader.Unload(); err != nil {
+	if err := p.unloader.Unload(unpin); err != nil {
 		return fmt.Errorf("Failed to unload: %w", err)
 	}
 	if p.unloaderOverride != nil {
-		if err := p.unloaderOverride.Unload(); err != nil {
+		if err := p.unloaderOverride.Unload(unpin); err != nil {
 			return fmt.Errorf("Failed to unload override: %w", err)
 		}
 	}
 	p.unloader = nil
 	p.unloaderOverride = nil
+	// The above unloader can succeed while not removing a pin to the program
+	// because of option.Config.KeepSensorsOnExit, and thus the maps remain.
+	if !p.Prog.IsPinned() {
+		p.LoadedMapsInfo = nil
+	}
 	return nil
 }
 

@@ -22,6 +22,7 @@
 #include "common.h"
 #include "process/data_event.h"
 #include "process/bpf_enforcer.h"
+#include "../syscall64.h"
 
 /* Type IDs form API with user space generickprobe.go */
 enum {
@@ -107,7 +108,8 @@ enum {
 	ACTION_SIGNAL = 9,
 	ACTION_TRACKSOCK = 10,
 	ACTION_UNTRACKSOCK = 11,
-	ACTION_NOTIFY_KILLER = 12,
+	ACTION_NOTIFY_ENFORCER = 12,
+	ACTION_CLEANUP_ENFORCER_NOTIFICATION = 13,
 };
 
 enum {
@@ -147,8 +149,6 @@ struct selector_arg_filters {
 	__u32 arglen;
 	__u32 argoff[5];
 } __attribute__((packed));
-
-#define IS_32BIT 0x80000000
 
 struct event_config {
 	__u32 func_id;
@@ -246,8 +246,8 @@ FUNC_INLINE int return_error(int *s, int err)
 FUNC_INLINE char *
 args_off(struct msg_generic_kprobe *e, unsigned long off)
 {
-	asm volatile("%[off] &= 0x3fff;\n" ::[off] "+r"(off)
-		     :);
+	asm volatile("%[off] &= 0x3fff;\n"
+		     : [off] "+r"(off));
 	return e->args + off;
 }
 
@@ -261,8 +261,9 @@ return_stack_error(char *args, int orig, int err)
 	asm volatile("%[orig] &= 0xfff;\n"
 		     "r1 = *(u64 *)%[args];\n"
 		     "r1 += %[orig];\n"
-		     "*(u32 *)(r1 + 0) = %[err];\n" ::[orig] "r+"(orig),
-		     [args] "m+"(args), [err] "r+"(err)
+		     "*(u32 *)(r1 + 0) = %[err];\n"
+		     : [orig] "+r"(orig), [args] "+m"(args), [err] "+r"(err)
+		     :
 		     : "r1");
 	return sizeof(int);
 }
@@ -285,8 +286,8 @@ parse_iovec_array(long off, unsigned long arg, int i, unsigned long max,
 		size = max;
 	if (size > 4094)
 		return char_buf_toolarge;
-	asm volatile("%[size] &= 0xfff;\n" ::[size] "+r"(size)
-		     :);
+	asm volatile("%[size] &= 0xfff;\n"
+		     : [size] "+r"(size));
 	err = probe_read(args_off(e, off), size, (char *)iov.iov_base);
 	if (err < 0)
 		return char_buf_pagefault;
@@ -346,8 +347,8 @@ FUNC_INLINE long copy_path(char *args, const struct path *arg)
 	if (!buffer)
 		return 0;
 
-	asm volatile("%[size] &= 0xff;\n" ::[size] "+r"(size)
-		     :);
+	asm volatile("%[size] &= 0xff;\n"
+		     : [size] "+r"(size));
 	probe_read(curr, size, buffer);
 	*s = size;
 	size += 4;
@@ -373,7 +374,7 @@ FUNC_INLINE long copy_path(char *args, const struct path *arg)
 		"r2 = *(u16 *)%[mode];\n"
 		"*(u16 *)(r1 + 4) = r2;\n"
 		:
-		: [pid] "m"(args), [flags] "m"(flags), [offset] "+m"(size), [mode] "m"(i_mode)
+		: [pid] "m"(args), [flags] "m"(flags), [offset] "m"(size), [mode] "m"(i_mode)
 		: "r0", "r1", "r2", "r7", "memory"
 		: a);
 a:
@@ -583,8 +584,8 @@ __copy_char_buf(void *ctx, long off, unsigned long arg, unsigned long bytes,
 
 	/* Bound bytes <4095 to ensure bytes does not read past end of buffer */
 	rd_bytes = bytes < 0x1000 ? bytes : 0xfff;
-	asm volatile("%[rd_bytes] &= 0xfff;\n" ::[rd_bytes] "+r"(rd_bytes)
-		     :);
+	asm volatile("%[rd_bytes] &= 0xfff;\n"
+		     : [rd_bytes] "+r"(rd_bytes));
 	err = probe_read(&s[2], rd_bytes, (char *)arg);
 	if (err < 0)
 		return return_error(s, char_buf_pagefault);
@@ -826,10 +827,7 @@ filter_char_buf_prefix(struct selector_arg_filter *filter, char *arg_str, uint a
 	return !!pass;
 }
 
-// Define a mask for the maximum path length on Linux.
-#define PATH_MASK (4096 - 1)
-
-FUNC_INLINE void copy_reverse(__u8 *dest, uint len, __u8 *src, uint offset)
+FUNC_INLINE void __copy_reverse(__u8 *dest, uint len, __u8 *src, uint offset, uint mask)
 {
 	uint i;
 
@@ -848,10 +846,23 @@ FUNC_INLINE void copy_reverse(__u8 *dest, uint len, __u8 *src, uint offset)
 	// Alternative (prettier) fixes resulted in a confused verifier
 	// unfortunately.
 	for (i = 0; i < (STRING_POSTFIX_MAX_MATCH_LENGTH - 1); i++) {
-		dest[i & STRING_POSTFIX_MAX_MASK] = src[(len + offset - 1 - i) & PATH_MASK];
+		dest[i & STRING_POSTFIX_MAX_MASK] = src[(len + offset - 1 - i) & mask];
 		if (len + offset == (i + 1))
 			return;
 	}
+}
+
+// Define a mask for the maximum path length on Linux.
+#define PATH_MASK (4096 - 1)
+
+FUNC_INLINE void copy_reverse(__u8 *dest, uint len, __u8 *src, uint offset)
+{
+	__copy_reverse(dest, len, src, offset, PATH_MASK);
+}
+
+FUNC_INLINE void file_copy_reverse(__u8 *dest, uint len, __u8 *src, uint offset)
+{
+	__copy_reverse(dest, len, src, offset, STRING_POSTFIX_MAX_LENGTH - 1);
 }
 
 FUNC_LOCAL long
@@ -1283,7 +1294,7 @@ filter_64ty_selector_val(struct selector_arg_filter *filter, char *args)
 				if (*(s64 *)args > (s64)w)
 					return 1;
 			} else {
-				if (*(u64 *)args > w)
+				if (*(u64 *)args < w)
 					return 1;
 			}
 			break;
@@ -1291,7 +1302,6 @@ filter_64ty_selector_val(struct selector_arg_filter *filter, char *args)
 		case op_filter_eq:
 		case op_filter_neq:
 			res = (*(u64 *)args == w);
-
 			if (filter->op == op_filter_eq && res)
 				return 1;
 			if (filter->op == op_filter_neq && !res)
@@ -1313,7 +1323,7 @@ filter_64ty_selector_val(struct selector_arg_filter *filter, char *args)
 // use the selector value to determine a hash map, and do a lookup to determine whether the argument
 // is in the defined set.
 FUNC_LOCAL long
-filter_64ty_map(struct selector_arg_filter *filter, char *args, bool set32bit)
+filter_64ty_map(struct selector_arg_filter *filter, char *args)
 {
 	void *argmap;
 	__u32 map_idx = filter->value;
@@ -1323,10 +1333,6 @@ filter_64ty_map(struct selector_arg_filter *filter, char *args, bool set32bit)
 		return 0;
 
 	__u64 arg = *((__u64 *)args);
-
-	if (set32bit)
-		arg |= IS_32BIT;
-
 	__u8 *pass = map_lookup_elem(argmap, &arg);
 
 	switch (filter->op) {
@@ -1339,7 +1345,7 @@ filter_64ty_map(struct selector_arg_filter *filter, char *args, bool set32bit)
 }
 
 FUNC_LOCAL long
-filter_64ty(struct selector_arg_filter *filter, char *args, bool set32bit)
+filter_64ty(struct selector_arg_filter *filter, char *args)
 {
 	switch (filter->op) {
 	case op_filter_lt:
@@ -1350,7 +1356,7 @@ filter_64ty(struct selector_arg_filter *filter, char *args, bool set32bit)
 		return filter_64ty_selector_val(filter, args);
 	case op_filter_inmap:
 	case op_filter_notinmap:
-		return filter_64ty_map(filter, args, set32bit);
+		return filter_64ty_map(filter, args);
 	}
 
 	return 0;
@@ -1520,6 +1526,7 @@ FUNC_INLINE size_t type_to_min_size(int type, int argm)
 struct match_binaries_sel_opts {
 	__u32 op;
 	__u32 map_id;
+	__u32 mbset_id;
 };
 
 // This map is used by the matchBinaries selectors to retrieve their options
@@ -1529,8 +1536,6 @@ struct {
 	__type(key, __u32); /* selector id */
 	__type(value, struct match_binaries_sel_opts);
 } tg_mb_sel_opts SEC(".maps");
-
-#define MATCH_BINARIES_PATH_MAX_LENGTH 256
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
@@ -1554,7 +1559,10 @@ FUNC_INLINE int match_binaries(__u32 selidx)
 	__u8 *found_key;
 #ifdef __LARGE_BPF_PROG
 	struct string_prefix_lpm_trie prefix_key;
-	long ret;
+	struct string_postfix_lpm_trie *postfix_key;
+	__u64 postfix_len = STRING_POSTFIX_MAX_MATCH_LENGTH - 1;
+
+	int zero = 0;
 #endif /* __LARGE_BPF_PROG */
 
 	struct match_binaries_sel_opts *selector_options;
@@ -1579,6 +1587,14 @@ FUNC_INLINE int match_binaries(__u32 selidx)
 
 		switch (selector_options->op) {
 		case op_filter_in:
+			/* Check if we match the selector's bit in ->mb_bitset, which means that the
+			 * process matches a matchBinaries section with a followChidren:true
+			 * attribute either because the binary matches or because the binary of a
+			 * parent matched.
+			 */
+			if (current->bin.mb_bitset & (1UL << selector_options->mbset_id))
+				return 1;
+			fallthrough;
 		case op_filter_notin:
 			path_map = map_lookup_elem(&tg_mb_paths, &selidx);
 			if (!path_map)
@@ -1594,10 +1610,29 @@ FUNC_INLINE int match_binaries(__u32 selidx)
 			// prepare the key on the stack to perform lookup in the LPM_TRIE
 			memset(&prefix_key, 0, sizeof(prefix_key));
 			prefix_key.prefixlen = current->bin.path_length * 8; // prefixlen is in bits
-			ret = probe_read(prefix_key.data, current->bin.path_length & (STRING_PREFIX_MAX_LENGTH - 1), current->bin.path);
-			if (ret < 0)
+			if (probe_read(prefix_key.data, current->bin.path_length & (STRING_PREFIX_MAX_LENGTH - 1), current->bin.path) < 0)
 				return 0;
 			found_key = map_lookup_elem(path_map, &prefix_key);
+			break;
+		case op_filter_str_postfix:
+		case op_filter_str_notpostfix:
+			path_map = map_lookup_elem(&string_postfix_maps, &selector_options->map_id);
+			if (!path_map)
+				return 0;
+			if (current->bin.path_length < STRING_POSTFIX_MAX_MATCH_LENGTH)
+				postfix_len = current->bin.path_length;
+			postfix_key = (struct string_postfix_lpm_trie *)map_lookup_elem(&string_postfix_maps_heap, &zero);
+			if (!postfix_key)
+				return 0;
+			postfix_key->prefixlen = postfix_len * 8; // prefixlen is in bits
+			if (!current->bin.reversed) {
+				file_copy_reverse((__u8 *)current->bin.end_r, postfix_len, (__u8 *)current->bin.end, current->bin.path_length - postfix_len);
+				current->bin.reversed = true;
+			}
+			if (postfix_len < STRING_POSTFIX_MAX_MATCH_LENGTH)
+				if (probe_read(postfix_key->data, postfix_len, current->bin.end_r) < 0)
+					return 0;
+			found_key = map_lookup_elem(path_map, postfix_key);
 			break;
 #endif /* __LARGE_BPF_PROG */
 		default:
@@ -1657,11 +1692,9 @@ selector_arg_offset(__u8 *f, struct msg_generic_kprobe *e, __u32 selidx,
 	for (i = 0; i < 5; i++)
 #endif
 	{
-		bool set32bit = false;
-
 		argsoff = filters->argoff[i];
-		asm volatile("%[argsoff] &= 0x3ff;\n" ::[argsoff] "+r"(argsoff)
-			     :);
+		asm volatile("%[argsoff] &= 0x3ff;\n"
+			     : [argsoff] "+r"(argsoff));
 
 		if (argsoff <= 0)
 			return pass ? seloff : 0;
@@ -1673,11 +1706,11 @@ selector_arg_offset(__u8 *f, struct msg_generic_kprobe *e, __u32 selidx,
 		if (index > 5)
 			return 0;
 
-		asm volatile("%[index] &= 0x7;\n" ::[index] "+r"(index)
-			     :);
+		asm volatile("%[index] &= 0x7;\n"
+			     : [index] "+r"(index));
 		argoff = e->argsoff[index];
-		asm volatile("%[argoff] &= 0x7ff;\n" ::[argoff] "+r"(argoff)
-			     :);
+		asm volatile("%[argoff] &= 0x7ff;\n"
+			     : [argoff] "+r"(argoff));
 		args = &e->args[argoff];
 
 		switch (filter->type) {
@@ -1686,6 +1719,9 @@ selector_arg_offset(__u8 *f, struct msg_generic_kprobe *e, __u32 selidx,
 			args += 4;
 		case file_ty:
 		case path_ty:
+#ifdef __LARGE_BPF_PROG
+		case linux_binprm_type:
+#endif
 			pass &= filter_file_buf(filter, (struct string_buf *)args);
 			break;
 		case string_type:
@@ -1701,14 +1737,13 @@ selector_arg_offset(__u8 *f, struct msg_generic_kprobe *e, __u32 selidx,
 			pass &= filter_char_buf(filter, args, 8);
 			break;
 		case syscall64_type:
-			set32bit = e->sel.is32BitSyscall;
 		case s64_ty:
 		case u64_ty:
 		case kernel_cap_ty:
 		case cap_inh_ty:
 		case cap_prm_ty:
 		case cap_eff_ty:
-			pass &= filter_64ty(filter, args, set32bit);
+			pass &= filter_64ty(filter, args);
 			break;
 		case size_type:
 		case int_type:
@@ -1832,6 +1867,20 @@ installfd(struct msg_generic_kprobe *e, int fd, int name, bool follow)
 		err = map_delete_elem(&fdinstall_map, &key);
 	}
 	return err;
+}
+
+FUNC_INLINE __u64
+msg_generic_arg_value_u64(struct msg_generic_kprobe *e, unsigned int arg_id, __u64 err_val)
+{
+	__u32 argoff;
+	__u64 *ret;
+
+	if (arg_id > MAX_POSSIBLE_ARGS)
+		return err_val;
+	argoff = e->argsoff[arg_id];
+	argoff &= GENERIC_MSG_ARGS_MASK;
+	ret = (__u64 *)&e->args[argoff];
+	return *ret;
 }
 
 FUNC_INLINE int
@@ -2109,12 +2158,18 @@ struct {
 } stack_trace_map SEC(".maps");
 
 #if defined GENERIC_TRACEPOINT || defined GENERIC_KPROBE
-FUNC_INLINE void do_action_notify_enforcer(int error, int signal)
+FUNC_INLINE void do_action_notify_enforcer(struct msg_generic_kprobe *e,
+					   int error, int signal, int info_arg_id)
 {
-	do_enforcer_action(error, signal);
+	__u64 argv = msg_generic_arg_value_u64(e, info_arg_id, 0);
+	struct enforcer_act_info info = {
+		.func_id = e->func_id,
+		.arg = argv,
+	};
+	do_enforcer_action(error, signal, info);
 }
 #else
-#define do_action_notify_enforcer(error, signal)
+#define do_action_notify_enforcer(e, error, signal, info_arg_id)
 #endif
 
 FUNC_LOCAL __u32
@@ -2129,6 +2184,7 @@ do_action(void *ctx, __u32 i, struct selector_action *actions,
 	int fdi, namei;
 	int newfdi, oldfdi;
 	int socki;
+	int argi __maybe_unused;
 	int err = 0;
 	int zero = 0;
 	__u64 id;
@@ -2168,6 +2224,12 @@ do_action(void *ctx, __u32 i, struct selector_action *actions,
 			e->common.flags |= MSG_COMMON_FLAG_USER_STACKTRACE;
 			e->user_stack_id = get_stackid(ctx, &stack_trace_map, BPF_F_USER_STACK);
 		}
+#ifdef __LARGE_MAP_KEYS
+		__u32 ima_hash = actions->act[++i];
+
+		if (ima_hash)
+			e->common.flags |= MSG_COMMON_FLAG_IMA_HASH;
+#endif
 		break;
 	}
 
@@ -2214,11 +2276,14 @@ do_action(void *ctx, __u32 i, struct selector_action *actions,
 		socki = actions->act[++i];
 		err = tracksock(e, socki, action == ACTION_TRACKSOCK);
 		break;
-	case ACTION_NOTIFY_KILLER:
+	case ACTION_NOTIFY_ENFORCER:
 		error = actions->act[++i];
 		signal = actions->act[++i];
-		do_action_notify_enforcer(error, signal);
+		argi = actions->act[++i];
+		do_action_notify_enforcer(e, error, signal, argi);
 		break;
+	case ACTION_CLEANUP_ENFORCER_NOTIFICATION:
+		do_enforcer_cleanup();
 	default:
 		break;
 	}
@@ -2326,7 +2391,7 @@ generic_actions(void *ctx, struct generic_maps *maps)
 	postit = do_actions(ctx, actions, maps);
 	if (postit)
 		tail_call(ctx, maps->calls, TAIL_CALL_SEND);
-	return 0;
+	return postit;
 }
 
 FUNC_INLINE long
@@ -2373,9 +2438,7 @@ generic_output(void *ctx, struct bpf_map_def *heap, u8 op)
 	asm volatile("%[total] &= 0x7fff;\n"
 		     "if %[total] < 9000 goto +1\n;"
 		     "%[total] = 9000;\n"
-		     :
-		     : [total] "+r"(total)
-		     :);
+		     : [total] "+r"(total));
 	perf_event_output_metric(ctx, op, &tcpmon_map, BPF_F_CURRENT_CPU, e, total);
 	return 0;
 }
@@ -2591,6 +2654,32 @@ read_call_arg(void *ctx, struct msg_generic_kprobe *e, int index, int type,
 
 do_copy_path:
 	return copy_path(args, path_arg);
+}
+
+#define __STR(x) #x
+
+#define set_if_not_errno_or_zero(x, y)                  \
+	({                                              \
+		asm volatile("if %0 s< -4095 goto +1\n" \
+			     "if %0 s<= 0 goto +1\n"    \
+			     "%0 = " __STR(y) "\n"      \
+			     : "+r"(x));                \
+	})
+
+FUNC_INLINE int try_override(void *ctx, struct bpf_map_def *override_tasks)
+{
+	__u64 id = get_current_pid_tgid();
+	__s32 *error, ret;
+
+	error = map_lookup_elem(override_tasks, &id);
+	if (!error)
+		return 0;
+
+	map_delete_elem(override_tasks, &id);
+	ret = *error;
+	/* Let's make verifier happy and 'force' proper bounds. */
+	set_if_not_errno_or_zero(ret, -1);
+	return ret;
 }
 
 #endif /* __BASIC_H__ */

@@ -62,7 +62,7 @@ func TestTracepointListSyscallDups(t *testing.T) {
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: "sys-write"
+  name: "sys-dups"
 spec:
   lists:
   - name: "test"
@@ -104,7 +104,7 @@ spec:
 		WithArgs(ec.NewKprobeArgumentListMatcher().
 			WithOperator(lc.Ordered).
 			WithValues(
-				ec.NewKprobeArgumentChecker().WithSizeArg(syscall.SYS_DUP),
+				ec.NewKprobeArgumentChecker().WithSyscallId(mkSysIDChecker(t, syscall.SYS_DUP)),
 				ec.NewKprobeArgumentChecker().WithSizeArg(9999),
 			))
 
@@ -112,7 +112,7 @@ spec:
 		WithArgs(ec.NewKprobeArgumentListMatcher().
 			WithOperator(lc.Ordered).
 			WithValues(
-				ec.NewKprobeArgumentChecker().WithSizeArg(syscall.SYS_DUP2),
+				ec.NewKprobeArgumentChecker().WithSyscallId(mkSysIDChecker(t, syscall.SYS_DUP2)),
 				ec.NewKprobeArgumentChecker().WithSizeArg(9999),
 			))
 
@@ -120,7 +120,7 @@ spec:
 		WithArgs(ec.NewKprobeArgumentListMatcher().
 			WithOperator(lc.Ordered).
 			WithValues(
-				ec.NewKprobeArgumentChecker().WithSizeArg(syscall.SYS_DUP3),
+				ec.NewKprobeArgumentChecker().WithSyscallId(mkSysIDChecker(t, syscall.SYS_DUP3)),
 				ec.NewKprobeArgumentChecker().WithSizeArg(9999),
 			))
 

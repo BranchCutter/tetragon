@@ -13,15 +13,10 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/tetragon/pkg/bpf"
 	cachedbtf "github.com/cilium/tetragon/pkg/btf"
 	"github.com/cilium/tetragon/pkg/logger"
-	"github.com/cilium/tetragon/pkg/option"
 	"github.com/cilium/tetragon/pkg/sensors/unloader"
-	"golang.org/x/sys/unix"
-)
-
-var (
-	verifierLogBufferSize = 10 * 1024 * 1024 // 10MB
 )
 
 // AttachFunc is the type for the various attachment functions. The function is
@@ -30,17 +25,32 @@ type AttachFunc func(*ebpf.Collection, *ebpf.CollectionSpec, *ebpf.Program, *ebp
 
 type OpenFunc func(*ebpf.CollectionSpec) error
 
-type tailCall struct {
-	name   string
-	prefix string
-}
-
 type LoadOpts struct {
 	Attach AttachFunc
 	Open   OpenFunc
+}
 
-	TcMap    string
-	TcPrefix string
+func linkPinPath(bpfDir string, load *Program, extra ...string) string {
+	pinPath := filepath.Join(bpfDir, load.PinPath, "link")
+	if len(extra) != 0 {
+		pinPath = pinPath + "_" + strings.Join(extra, "_")
+	}
+	return pinPath
+}
+
+func linkPin(lnk link.Link, bpfDir string, load *Program, extra ...string) error {
+	// pinned link is not supported
+	if !bpf.HasLinkPin() {
+		return nil
+	}
+
+	pinPath := linkPinPath(bpfDir, load, extra...)
+
+	err := lnk.Pin(pinPath)
+	if err != nil {
+		return fmt.Errorf("pinning link '%s' failed: %w", pinPath, err)
+	}
+	return nil
 }
 
 func RawAttach(targetFD int) AttachFunc {
@@ -62,7 +72,7 @@ func RawAttachWithFlags(targetFD int, flags uint32) AttachFunc {
 			return nil, fmt.Errorf("attaching '%s' failed: %w", spec.Name, err)
 		}
 		return unloader.ChainUnloader{
-			unloader.PinUnloader{
+			unloader.ProgUnloader{
 				Prog: prog,
 			},
 			&unloader.RawDetachUnloader{
@@ -75,7 +85,7 @@ func RawAttachWithFlags(targetFD int, flags uint32) AttachFunc {
 	}
 }
 
-func TracepointAttach(load *Program) AttachFunc {
+func TracepointAttach(load *Program, bpfDir string) AttachFunc {
 	return func(_ *ebpf.Collection, _ *ebpf.CollectionSpec,
 		prog *ebpf.Program, spec *ebpf.ProgramSpec) (unloader.Unloader, error) {
 
@@ -87,8 +97,13 @@ func TracepointAttach(load *Program) AttachFunc {
 		if err != nil {
 			return nil, fmt.Errorf("attaching '%s' failed: %w", spec.Name, err)
 		}
+		err = linkPin(tpLink, bpfDir, load)
+		if err != nil {
+			tpLink.Close()
+			return nil, err
+		}
 		return &unloader.RelinkUnloader{
-			UnloadProg: unloader.PinUnloader{Prog: prog}.Unload,
+			UnloadProg: unloader.ProgUnloader{Prog: prog}.Unload,
 			IsLinked:   true,
 			Link:       tpLink,
 			RelinkFn: func() (link.Link, error) {
@@ -117,7 +132,7 @@ func RawTracepointAttach(load *Program) AttachFunc {
 			return nil, fmt.Errorf("attaching '%s' failed: %w", spec.Name, err)
 		}
 		return unloader.ChainUnloader{
-			unloader.PinUnloader{
+			unloader.ProgUnloader{
 				Prog: prog,
 			},
 			unloader.LinkUnloader{
@@ -157,7 +172,8 @@ func KprobeOpen(load *Program) OpenFunc {
 	}
 }
 
-func kprobeAttach(load *Program, prog *ebpf.Program, spec *ebpf.ProgramSpec, symbol string) (unloader.Unloader, error) {
+func kprobeAttach(load *Program, prog *ebpf.Program, spec *ebpf.ProgramSpec,
+	symbol string, bpfDir string, extra ...string) (unloader.Unloader, error) {
 	var linkFn func() (link.Link, error)
 
 	if load.RetProbe {
@@ -170,8 +186,14 @@ func kprobeAttach(load *Program, prog *ebpf.Program, spec *ebpf.ProgramSpec, sym
 	if err != nil {
 		return nil, fmt.Errorf("attaching '%s' failed: %w", spec.Name, err)
 	}
+	err = linkPin(lnk, bpfDir, load, extra...)
+	if err != nil {
+		lnk.Close()
+		return nil, err
+	}
+	load.Link = lnk
 	return &unloader.RelinkUnloader{
-		UnloadProg: unloader.PinUnloader{Prog: prog}.Unload,
+		UnloadProg: unloader.ProgUnloader{Prog: prog}.Unload,
 		IsLinked:   true,
 		Link:       lnk,
 		RelinkFn:   linkFn,
@@ -196,13 +218,13 @@ func kprobeAttachOverride(load *Program, bpfDir string,
 		return fmt.Errorf("failed to clone generic_kprobe_override program: %w", err)
 	}
 
-	pinPath := filepath.Join(bpfDir, fmt.Sprint(load.PinPath, "-override"))
+	pinPath := filepath.Join(bpfDir, load.PinPath, "prog_override")
 
 	if err := prog.Pin(pinPath); err != nil {
 		return fmt.Errorf("pinning '%s' to '%s' failed: %w", load.Label, pinPath, err)
 	}
 
-	load.unloaderOverride, err = kprobeAttach(load, prog, spec, load.Attach)
+	load.unloaderOverride, err = kprobeAttach(load, prog, spec, load.Attach, bpfDir, "override")
 	if err != nil {
 		logger.GetLogger().Warnf("Failed to attach override program: %w", err)
 	}
@@ -245,8 +267,14 @@ func fmodretAttachOverride(load *Program, bpfDir string,
 		return fmt.Errorf("attaching '%s' failed: %w", spec.Name, err)
 	}
 
+	err = linkPin(lnk, bpfDir, load, "override")
+	if err != nil {
+		lnk.Close()
+		return err
+	}
+
 	load.unloaderOverride = &unloader.RelinkUnloader{
-		UnloadProg: unloader.PinUnloader{Prog: prog}.Unload,
+		UnloadProg: unloader.ProgUnloader{Prog: prog}.Unload,
 		IsLinked:   true,
 		Link:       lnk,
 		RelinkFn:   linkFn,
@@ -271,7 +299,7 @@ func KprobeAttach(load *Program, bpfDir string) AttachFunc {
 			}
 		}
 
-		return kprobeAttach(load, prog, spec, load.Attach)
+		return kprobeAttach(load, prog, spec, load.Attach, bpfDir)
 	}
 }
 
@@ -297,7 +325,7 @@ func UprobeAttach(load *Program) AttachFunc {
 			return nil, fmt.Errorf("attaching '%s' failed: %w", spec.Name, err)
 		}
 		return &unloader.RelinkUnloader{
-			UnloadProg: unloader.PinUnloader{Prog: prog}.Unload,
+			UnloadProg: unloader.ProgUnloader{Prog: prog}.Unload,
 			IsLinked:   true,
 			Link:       lnk,
 			RelinkFn:   linkFn,
@@ -339,7 +367,7 @@ func MultiUprobeAttach(load *Program) AttachFunc {
 
 		return &unloader.MultiRelinkUnloader{
 			UnloadProg: unloader.ChainUnloader{
-				unloader.PinUnloader{
+				unloader.ProgUnloader{
 					Prog: prog,
 				},
 			}.Unload,
@@ -354,7 +382,7 @@ func NoAttach() AttachFunc {
 	return func(_ *ebpf.Collection, _ *ebpf.CollectionSpec,
 		prog *ebpf.Program, _ *ebpf.ProgramSpec) (unloader.Unloader, error) {
 		return unloader.ChainUnloader{
-			unloader.PinUnloader{
+			unloader.ProgUnloader{
 				Prog: prog,
 			},
 		}, nil
@@ -374,7 +402,7 @@ func TracingAttach() AttachFunc {
 			return nil, fmt.Errorf("attaching '%s' failed: %w", spec.Name, err)
 		}
 		return &unloader.RelinkUnloader{
-			UnloadProg: unloader.PinUnloader{Prog: prog}.Unload,
+			UnloadProg: unloader.ProgUnloader{Prog: prog}.Unload,
 			IsLinked:   true,
 			Link:       lnk,
 			RelinkFn:   linkFn,
@@ -382,9 +410,23 @@ func TracingAttach() AttachFunc {
 	}
 }
 
+func LSMOpen(load *Program) OpenFunc {
+	return func(coll *ebpf.CollectionSpec) error {
+		for _, prog := range coll.Programs {
+			if prog.AttachType == ebpf.AttachLSMMac {
+				prog.AttachTo = load.Attach
+			} else {
+				return fmt.Errorf("Only AttachLSMMac is supported for generic_lsm programs")
+			}
+		}
+		return nil
+	}
+}
+
 func LSMAttach() AttachFunc {
 	return func(_ *ebpf.Collection, _ *ebpf.CollectionSpec,
 		prog *ebpf.Program, spec *ebpf.ProgramSpec) (unloader.Unloader, error) {
+
 		linkFn := func() (link.Link, error) {
 			return link.AttachLSM(link.LSMOptions{
 				Program: prog,
@@ -395,7 +437,7 @@ func LSMAttach() AttachFunc {
 			return nil, fmt.Errorf("attaching '%s' failed: %w", spec.Name, err)
 		}
 		return &unloader.RelinkUnloader{
-			UnloadProg: unloader.PinUnloader{Prog: prog}.Unload,
+			UnloadProg: unloader.ProgUnloader{Prog: prog}.Unload,
 			IsLinked:   true,
 			Link:       lnk,
 			RelinkFn:   linkFn,
@@ -404,7 +446,8 @@ func LSMAttach() AttachFunc {
 }
 
 func multiKprobeAttach(load *Program, prog *ebpf.Program,
-	spec *ebpf.ProgramSpec, opts link.KprobeMultiOptions) (unloader.Unloader, error) {
+	spec *ebpf.ProgramSpec, opts link.KprobeMultiOptions,
+	bpfDir string, extra ...string) (unloader.Unloader, error) {
 
 	var lnk link.Link
 	var err error
@@ -417,8 +460,14 @@ func multiKprobeAttach(load *Program, prog *ebpf.Program,
 	if err != nil {
 		return nil, fmt.Errorf("attaching '%s' failed: %w", spec.Name, err)
 	}
+	err = linkPin(lnk, bpfDir, load, extra...)
+	if err != nil {
+		lnk.Close()
+		return nil, err
+	}
+	load.Link = lnk
 	return unloader.ChainUnloader{
-		unloader.PinUnloader{
+		unloader.ProgUnloader{
 			Prog: prog,
 		},
 		unloader.LinkUnloader{
@@ -462,7 +511,7 @@ func MultiKprobeAttach(load *Program, bpfDir string) AttachFunc {
 				Symbols: data.Overrides,
 			}
 
-			load.unloaderOverride, err = multiKprobeAttach(load, progOverride, progOverrideSpec, opts)
+			load.unloaderOverride, err = multiKprobeAttach(load, progOverride, progOverrideSpec, opts, bpfDir, "override")
 			if err != nil {
 				logger.GetLogger().Warnf("Failed to attach override program: %w", err)
 			}
@@ -473,22 +522,13 @@ func MultiKprobeAttach(load *Program, bpfDir string) AttachFunc {
 			Cookies: data.Cookies,
 		}
 
-		return multiKprobeAttach(load, prog, spec, opts)
+		return multiKprobeAttach(load, prog, spec, opts, bpfDir)
 	}
 }
 
 func LoadTracepointProgram(bpfDir string, load *Program, verbose int) error {
-	var tc tailCall
-	for mName, m := range load.PinMap {
-		if mName == "tp_calls" || mName == "execve_calls" {
-			tc = tailCall{m.PinName, "tracepoint"}
-			break
-		}
-	}
 	opts := &LoadOpts{
-		Attach:   TracepointAttach(load),
-		TcMap:    tc.name,
-		TcPrefix: tc.prefix,
+		Attach: TracepointAttach(load, bpfDir),
 	}
 	return loadProgram(bpfDir, load, opts, verbose)
 }
@@ -501,34 +541,25 @@ func LoadRawTracepointProgram(bpfDir string, load *Program, verbose int) error {
 }
 
 func LoadKprobeProgram(bpfDir string, load *Program, verbose int) error {
-	var tc tailCall
-	for mName, m := range load.PinMap {
-		if mName == "kprobe_calls" || mName == "retkprobe_calls" {
-			tc = tailCall{m.PinName, "kprobe"}
-			break
-		}
-	}
 	opts := &LoadOpts{
-		Attach:   KprobeAttach(load, bpfDir),
-		Open:     KprobeOpen(load),
-		TcMap:    tc.name,
-		TcPrefix: tc.prefix,
+		Attach: KprobeAttach(load, bpfDir),
+		Open:   KprobeOpen(load),
 	}
 	return loadProgram(bpfDir, load, opts, verbose)
 }
 
-func KprobeAttachMany(load *Program, syms []string) AttachFunc {
+func KprobeAttachMany(load *Program, syms []string, bpfDir string) AttachFunc {
 	return func(_ *ebpf.Collection, _ *ebpf.CollectionSpec,
 		prog *ebpf.Program, spec *ebpf.ProgramSpec) (unloader.Unloader, error) {
 
 		unloader := unloader.ChainUnloader{
-			unloader.PinUnloader{
+			unloader.ProgUnloader{
 				Prog: prog,
 			},
 		}
 
 		for idx := range syms {
-			un, err := kprobeAttach(load, prog, spec, syms[idx])
+			un, err := kprobeAttach(load, prog, spec, syms[idx], bpfDir, fmt.Sprintf("%d_%s", idx, syms[idx]))
 			if err != nil {
 				return nil, err
 			}
@@ -541,40 +572,22 @@ func KprobeAttachMany(load *Program, syms []string) AttachFunc {
 
 func LoadKprobeProgramAttachMany(bpfDir string, load *Program, syms []string, verbose int) error {
 	opts := &LoadOpts{
-		Attach: KprobeAttachMany(load, syms),
+		Attach: KprobeAttachMany(load, syms, bpfDir),
 	}
 	return loadProgram(bpfDir, load, opts, verbose)
 }
 
 func LoadUprobeProgram(bpfDir string, load *Program, verbose int) error {
-	var tc tailCall
-	for mName, m := range load.PinMap {
-		if mName == "uprobe_calls" {
-			tc = tailCall{m.PinName, "uprobe"}
-			break
-		}
-	}
 	opts := &LoadOpts{
-		Attach:   UprobeAttach(load),
-		TcMap:    tc.name,
-		TcPrefix: tc.prefix,
+		Attach: UprobeAttach(load),
 	}
 	return loadProgram(bpfDir, load, opts, verbose)
 }
 
 func LoadMultiKprobeProgram(bpfDir string, load *Program, verbose int) error {
-	var tc tailCall
-	for mName, m := range load.PinMap {
-		if mName == "kprobe_calls" || mName == "retkprobe_calls" {
-			tc = tailCall{m.PinName, "kprobe"}
-			break
-		}
-	}
 	opts := &LoadOpts{
-		Attach:   MultiKprobeAttach(load, bpfDir),
-		Open:     KprobeOpen(load),
-		TcMap:    tc.name,
-		TcPrefix: tc.prefix,
+		Attach: MultiKprobeAttach(load, bpfDir),
+		Open:   KprobeOpen(load),
 	}
 	return loadProgram(bpfDir, load, opts, verbose)
 }
@@ -597,7 +610,7 @@ func LoadFmodRetProgram(bpfDir string, load *Program, progName string, verbose i
 				return nil, fmt.Errorf("attaching '%s' failed: %w", spec.Name, err)
 			}
 			return &unloader.RelinkUnloader{
-				UnloadProg: unloader.PinUnloader{Prog: prog}.Unload,
+				UnloadProg: unloader.ProgUnloader{Prog: prog}.Unload,
 				IsLinked:   true,
 				Link:       lnk,
 				RelinkFn:   linkFn,
@@ -625,16 +638,21 @@ func LoadTracingProgram(bpfDir string, load *Program, verbose int) error {
 func LoadLSMProgram(bpfDir string, load *Program, verbose int) error {
 	opts := &LoadOpts{
 		Attach: LSMAttach(),
+		Open:   LSMOpen(load),
+	}
+	return loadProgram(bpfDir, load, opts, verbose)
+}
+
+func LoadLSMProgramSimple(bpfDir string, load *Program, verbose int) error {
+	opts := &LoadOpts{
+		Attach: LSMAttach(),
 	}
 	return loadProgram(bpfDir, load, opts, verbose)
 }
 
 func LoadMultiUprobeProgram(bpfDir string, load *Program, verbose int) error {
-	tc := tailCall{fmt.Sprintf("%s-up_calls", load.PinPath), "uprobe"}
 	opts := &LoadOpts{
-		Attach:   MultiUprobeAttach(load),
-		TcMap:    tc.name,
-		TcPrefix: tc.prefix,
+		Attach: MultiUprobeAttach(load),
 	}
 	return loadProgram(bpfDir, load, opts, verbose)
 }
@@ -674,7 +692,7 @@ func slimVerifierError(errStr string) string {
 	return errStr[:headEnd] + "\n...\n" + errStr[tailStart:]
 }
 
-func installTailCalls(bpfDir string, spec *ebpf.CollectionSpec, coll *ebpf.Collection, loadOpts *LoadOpts) error {
+func installTailCalls(bpfDir string, spec *ebpf.CollectionSpec, coll *ebpf.Collection, load *Program) error {
 	// FIXME(JM): This should be replaced by using the cilium/ebpf prog array initialization.
 
 	secToProgName := make(map[string]string)
@@ -682,8 +700,8 @@ func installTailCalls(bpfDir string, spec *ebpf.CollectionSpec, coll *ebpf.Colle
 		secToProgName[prog.SectionName] = name
 	}
 
-	install := func(mapName string, secPrefix string) error {
-		tailCallsMap, err := ebpf.LoadPinnedMap(filepath.Join(bpfDir, mapName), nil)
+	install := func(pinPath string, secPrefix string) error {
+		tailCallsMap, err := ebpf.LoadPinnedMap(filepath.Join(bpfDir, pinPath), nil)
 		if err != nil {
 			return nil
 		}
@@ -695,7 +713,7 @@ func installTailCalls(bpfDir string, spec *ebpf.CollectionSpec, coll *ebpf.Colle
 				if prog, ok := coll.Programs[progName]; ok {
 					err := tailCallsMap.Update(uint32(i), uint32(prog.FD()), ebpf.UpdateAny)
 					if err != nil {
-						return fmt.Errorf("update of tail-call map '%s' failed: %w", mapName, err)
+						return fmt.Errorf("update of tail-call map '%s' failed: %w", pinPath, err)
 					}
 				}
 			}
@@ -703,10 +721,46 @@ func installTailCalls(bpfDir string, spec *ebpf.CollectionSpec, coll *ebpf.Colle
 		return nil
 	}
 
-	if len(loadOpts.TcMap) != 0 {
-		if err := install(loadOpts.TcMap, loadOpts.TcPrefix); err != nil {
+	if load.TcMap != nil {
+		if err := install(load.TcMap.PinPath, load.TcPrefix); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+// MissingConstantsError is returned by [rewriteConstants].
+type MissingConstantsError struct {
+	// The constants missing from .rodata.
+	Constants []string
+}
+
+func (m *MissingConstantsError) Error() string {
+	return fmt.Sprintf("some constants are missing from .rodata: %s", strings.Join(m.Constants, ", "))
+}
+
+func rewriteConstants(spec *ebpf.CollectionSpec, consts map[string]interface{}) error {
+	var missing []string
+
+	for n, c := range consts {
+		v, ok := spec.Variables[n]
+		if !ok {
+			missing = append(missing, n)
+			continue
+		}
+
+		if !v.Constant() {
+			return fmt.Errorf("variable %s is not a constant", n)
+		}
+
+		if err := v.Set(c); err != nil {
+			return fmt.Errorf("rewriting constant %s: %w", n, err)
+		}
+	}
+
+	if len(missing) != 0 {
+		return fmt.Errorf("rewrite constants: %w", &MissingConstantsError{Constants: missing})
 	}
 
 	return nil
@@ -719,24 +773,24 @@ func doLoadProgram(
 	verbose int,
 ) (*LoadedCollection, error) {
 	var btfSpec *btf.Spec
-	if btfFilePath := cachedbtf.GetCachedBTFFile(); btfFilePath != "/sys/kernel/btf/vmlinux" || len(option.Config.KMods) > 0 {
+	if btfFilePath := cachedbtf.GetCachedBTFFile(); btfFilePath != "/sys/kernel/btf/vmlinux" {
 		// Non-standard path to BTF, open it and provide it as 'KernelTypes'.
 		var err error
 		btfSpec, err = btf.LoadSpec(btfFilePath)
 		if err != nil {
 			return nil, fmt.Errorf("opening BTF file '%s' failed: %w", btfFilePath, err)
 		}
-		if len(option.Config.KMods) > 0 {
-			btfSpec, err = cachedbtf.AddModulesToSpec(btfSpec, option.Config.KMods)
-			if err != nil {
-				return nil, fmt.Errorf("adding modules to spec failed: %w", err)
-			}
-		}
 	}
 
 	spec, err := ebpf.LoadCollectionSpec(load.Name)
 	if err != nil {
 		return nil, fmt.Errorf("loading collection spec failed: %w", err)
+	}
+
+	if load.RewriteConstants != nil {
+		if err := rewriteConstants(spec, load.RewriteConstants); err != nil {
+			return nil, fmt.Errorf("rewritting constants in spec failed: %w", err)
+		}
 	}
 
 	if loadOpts.Open != nil {
@@ -789,7 +843,7 @@ func doLoadProgram(
 		var err error
 		var mapPath string
 		if pm, ok := load.PinMap[name]; ok {
-			mapPath = filepath.Join(bpfDir, pm.PinName)
+			mapPath = filepath.Join(bpfDir, pm.PinPath)
 		} else {
 			mapPath = filepath.Join(bpfDir, name)
 		}
@@ -810,52 +864,92 @@ func doLoadProgram(
 	opts.MapReplacements = pinnedMaps
 
 	coll, err := ebpf.NewCollectionWithOptions(spec, opts)
+	if err != nil && load.KernelTypes != nil {
+		opts.Programs.KernelTypes = load.KernelTypes
+		coll, err = ebpf.NewCollectionWithOptions(spec, opts)
+	}
 	if err != nil {
-		// Retry again with logging to capture the verifier log. We don't log by default
-		// as that makes the loading very slow.
-		opts.Programs.LogLevel = 1
-		opts.Programs.LogSize = verifierLogBufferSize
-		// If we hit ENOSPC that means that our log size is not big enough,
-		// so keep trying again with log size * 2 until we succeed or the kernel
-		// complains.
-		for {
-			coll, err = ebpf.NewCollectionWithOptions(spec, opts)
-			if errors.Is(err, unix.ENOSPC) {
-				opts.Programs.LogSize = opts.Programs.LogSize * 2
-				continue
-			}
-			break
-		}
-		if err != nil {
-			// Log the error directly using the logger so that the verifier log
-			// gets properly pretty-printed.
-			if verbose != 0 {
-				logger.GetLogger().Infof("Opening collection failed, dumping verifier log.")
-				var ve *ebpf.VerifierError
-				if errors.As(err, &ve) {
-					// Print a truncated version if we have verbose=1, otherwise dump the
-					// full log.
-					if verbose < 2 {
-						fmt.Println(slimVerifierError(fmt.Sprintf("%+v", ve)))
-					} else {
-						fmt.Printf("%+v\n", ve)
-					}
+		// Log the error directly using the logger so that the verifier log
+		// gets properly pretty-printed.
+		if verbose != 0 {
+			logger.GetLogger().Infof("Opening collection failed, dumping verifier log.")
+			var ve *ebpf.VerifierError
+			if errors.As(err, &ve) {
+				// Print a truncated version if we have verbose=1, otherwise dump the
+				// full log.
+				if verbose < 2 {
+					fmt.Println(slimVerifierError(fmt.Sprintf("%+v", ve)))
+				} else {
+					fmt.Printf("%+v\n", ve)
 				}
 			}
-
-			return nil, fmt.Errorf("opening collection '%s' failed: %w", load.Name, err)
 		}
+
+		return nil, fmt.Errorf("opening collection '%s' failed: %w", load.Name, err)
 	}
 	defer coll.Close()
 
-	err = installTailCalls(bpfDir, spec, coll, loadOpts)
+	// This is for accounting of the BPF map memlock usage. At first I thought I
+	// could just read the coll.Maps but those contain (a lot of) unused maps in
+	// the ELF file (e.g. tg_cgrps_tracking_map) that are loaded initially but
+	// not used or referenced anywhere so GCed as soon as we close the reference
+	// on the collection.
+	//
+	// The way we found is to browse which maps are used from the returned
+	// programs in the collection. Since for those programs we keep a reference
+	// anyway, they can't be garbage collected.
+	collMaps := map[ebpf.MapID]*ebpf.Map{}
+	// we need a mapping by ID
+	for _, m := range coll.Maps {
+		info, err := m.Info()
+		if err != nil {
+			logger.GetLogger().WithError(err).WithField("map", m.String()).Warn("failed to retrieve BPF map info")
+			break
+		}
+		id, available := info.ID()
+		if !available {
+			logger.GetLogger().WithField("map", m.String()).Warn("failed to retrieve BPF map ID, you might be running <4.13")
+			break
+		}
+		collMaps[id] = m
+	}
+	load.LoadedMapsInfo = map[int]bpf.ExtendedMapInfo{}
+	for _, p := range coll.Programs {
+		i, err := p.Info()
+		if err != nil {
+			logger.GetLogger().WithError(err).WithField("program", p.String()).Warn("failed to retrieve BPF program info, you might be running <4.10")
+			break
+		}
+		ids, available := i.MapIDs()
+		if !available {
+			logger.GetLogger().WithField("program", p.String()).Warn("failed to retrieve BPF program map IDs, you might be running <4.15")
+			break
+		}
+		for _, id := range ids {
+			if _, exist := load.LoadedMapsInfo[int(id)]; exist {
+				continue
+			}
+			xInfo, err := bpf.ExtendedInfoFromMap(collMaps[id])
+			if err != nil {
+				logger.GetLogger().WithError(err).WithField("mapID", id).Warn("failed to retrieve extended map info")
+				break
+			}
+			load.LoadedMapsInfo[int(id)] = xInfo
+		}
+	}
+
+	err = installTailCalls(bpfDir, spec, coll, load)
 	if err != nil {
 		return nil, fmt.Errorf("installing tail calls failed: %s", err)
 	}
 
 	for _, mapLoad := range load.MapLoad {
+		pinPath := ""
+		if pm, ok := load.PinMap[mapLoad.Name]; ok {
+			pinPath = pm.PinPath
+		}
 		if m, ok := coll.Maps[mapLoad.Name]; ok {
-			if err := mapLoad.Load(m, mapLoad.Index); err != nil {
+			if err := mapLoad.Load(m, pinPath, mapLoad.Index); err != nil {
 				return nil, err
 			}
 		} else {
@@ -868,7 +962,7 @@ func doLoadProgram(
 		return nil, fmt.Errorf("program for section '%s' not found", load.Label)
 	}
 
-	pinPath := filepath.Join(bpfDir, load.PinPath)
+	pinPath := filepath.Join(bpfDir, load.PinPath, "prog")
 
 	if _, err := os.Stat(pinPath); err == nil {
 		logger.GetLogger().Debugf("Pin file '%s' already exists, repinning", load.PinPath)
@@ -895,6 +989,13 @@ func doLoadProgram(
 		}
 		return nil, err
 	}
+
+	load.Prog = prog
+
+	// in KernelTypes, we use a non-standard BTF which is possibly annotated with symbols
+	// from kernel modules. At this point we don't need that anymore, so we can release
+	// the memory from it.
+	load.KernelTypes = nil
 
 	// Copy the loaded collection before it's destroyed
 	if KeepCollection {

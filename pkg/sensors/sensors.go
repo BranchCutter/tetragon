@@ -4,8 +4,13 @@
 package sensors
 
 import (
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
+	"sync"
 
+	"github.com/cilium/tetragon/pkg/bpf"
 	"github.com/cilium/tetragon/pkg/logger"
 	"github.com/cilium/tetragon/pkg/policyfilter"
 	"github.com/cilium/tetragon/pkg/sensors/program"
@@ -17,8 +22,10 @@ import (
 )
 
 var (
-	// AllPrograms are all the loaded programs. For use with Unload().
-	AllPrograms = []*program.Program{}
+	// allPrograms are all the loaded programs. For use with Unload().
+	allPrograms = []*program.Program{}
+	// allPrograms lock
+	allProgramsMutex sync.Mutex
 	// AllMaps are all the loaded programs. For use with Unload().
 	AllMaps = []*program.Map{}
 )
@@ -36,6 +43,12 @@ var (
 type Sensor struct {
 	// Name is a human-readbale description.
 	Name string
+	// Policy namespace the sensor is part of.
+	Namespace string
+	// Policy name the sensor is part of.
+	Policy string
+	// When loaded this contains bpffs root directory
+	BpfDir string
 	// Progs are all the BPF programs that exist on the filesystem.
 	Progs []*program.Program
 	// Maps are all the BPF Maps that the progs use.
@@ -58,13 +71,70 @@ type Sensor struct {
 	DestroyHook SensorHook
 }
 
+func (s *Sensor) AddPostUnloadHook(hook SensorHook) {
+	if s.PostUnloadHook == nil {
+		s.PostUnloadHook = hook
+		return
+	}
+
+	oldUnloadHook := s.PostUnloadHook
+	s.PostUnloadHook = func() error {
+		err1 := oldUnloadHook()
+		err2 := hook()
+		return errors.Join(err1, err2)
+	}
+}
+
+func sanitize(name string) string {
+	return strings.ReplaceAll(name, "/", "_")
+}
+
+type ProgOverhead struct {
+	Namespace string
+	Policy    string
+	Sensor    string
+	Attach    string
+	Label     string
+	RunTime   uint64
+	RunCnt    uint64
+}
+
 // SensorIface is an interface for sensors.Sensor that allows implementing sensors for testing.
 type SensorIface interface {
 	GetName() string
 	IsLoaded() bool
 	Load(bpfDir string) error
-	Unload() error
-	Destroy()
+	Unload(unpin bool) error
+	Destroy(unpin bool)
+	// TotalMemlock is the total amount of memlock bytes for BPF maps used by
+	// the sensor's programs.
+	TotalMemlock() int
+	Overhead() ([]ProgOverhead, bool)
+}
+
+func (s *Sensor) Overhead() ([]ProgOverhead, bool) {
+	var list []ProgOverhead
+
+	for _, p := range s.Progs {
+		if p.Prog == nil {
+			continue
+		}
+		info, err := p.Prog.Info()
+		if err != nil {
+			continue
+		}
+		runTime, _ := info.Runtime()
+		runCnt, _ := info.RunCount()
+
+		list = append(list, ProgOverhead{
+			Attach:  p.Attach,
+			Label:   p.Label,
+			Sensor:  s.Name,
+			RunTime: uint64(runTime),
+			RunCnt:  runCnt,
+		})
+	}
+	return list, len(list) != 0
 }
 
 func (s *Sensor) GetName() string {
@@ -75,25 +145,55 @@ func (s *Sensor) IsLoaded() bool {
 	return s.Loaded
 }
 
+func (s Sensor) TotalMemlock() int {
+	uniqueMap := map[int]bpf.ExtendedMapInfo{}
+	for _, p := range s.Progs {
+		for id, info := range p.LoadedMapsInfo {
+			// we could first check that it exist then write but all maps with
+			// same ID on the kernel should share the same info
+			uniqueMap[id] = info
+		}
+	}
+
+	var total int
+	for _, info := range uniqueMap {
+		// we are using info.Name that is truncated to 15 chars to exclude
+		// global maps, a more resilient implementation could use ID but this
+		// should be enough.
+		if program.IsGlobalMap(info.Name) {
+			continue
+		}
+		total += info.Memlock
+	}
+
+	return total
+}
+
 // SensorHook is the function signature for an optional function
 // that can be called during sensor unloading and removing.
 type SensorHook func() error
 
-func SensorCombine(name string, sensors ...*Sensor) *Sensor {
+func SensorCombine(tp tracingpolicy.TracingPolicy, name string, sensors ...*Sensor) *Sensor {
 	progs := []*program.Program{}
 	maps := []*program.Map{}
 	for _, s := range sensors {
 		progs = append(progs, s.Progs...)
 		maps = append(maps, s.Maps...)
 	}
-	return SensorBuilder(name, progs, maps)
+	return SensorBuilder(tp, name, progs, maps)
 }
 
-func SensorBuilder(name string, p []*program.Program, m []*program.Map) *Sensor {
+func SensorBuilder(tp tracingpolicy.TracingPolicy, name string, p []*program.Program, m []*program.Map) *Sensor {
+	namespace := ""
+	if tpn, ok := tp.(tracingpolicy.TracingPolicyNamespaced); ok {
+		namespace = tpn.TpNamespace()
+	}
 	return &Sensor{
-		Name:  name,
-		Progs: p,
-		Maps:  m,
+		Name:      name,
+		Progs:     p,
+		Maps:      m,
+		Policy:    tp.TpName(),
+		Namespace: namespace,
 	}
 }
 
@@ -119,6 +219,7 @@ var (
 		"raw_tp":         program.LoadRawTracepointProgram,
 		"cgrp_socket":    cgroup.LoadCgroupProgram,
 		"kprobe":         program.LoadKprobeProgram,
+		"lsm":            program.LoadLSMProgram,
 	}
 )
 
@@ -164,5 +265,46 @@ func GetMergedSensorFromParserPolicy(tp tracingpolicy.TracingPolicy) (SensorIfac
 		sensors = append(sensors, s)
 	}
 
-	return SensorCombine(tp.TpName(), sensors...), nil
+	return SensorCombine(tp, tp.TpName(), sensors...), nil
+}
+
+func progsAdd(progs []*program.Program) {
+	allProgramsMutex.Lock()
+	defer allProgramsMutex.Unlock()
+
+	allPrograms = append(allPrograms, progs...)
+}
+
+func progsCleanup() {
+	allProgramsMutex.Lock()
+	defer allProgramsMutex.Unlock()
+
+	progs := []*program.Program{}
+
+	for _, p := range allPrograms {
+		if p.LoadState.IsLoaded() {
+			progs = append(progs, p)
+		}
+	}
+
+	allPrograms = progs
+}
+
+func AllPrograms() []*program.Program {
+	return append([]*program.Program{}, allPrograms...)
+}
+
+// sortSensors sort the sensors to enforce orderging constrains
+func sortSensors(sensors []SensorIface) {
+	sort.Slice(sensors, func(i, j int) bool {
+		iName := sensors[i].GetName()
+		if iName == "__enforcer__" {
+			return true
+		}
+		jName := sensors[j].GetName()
+		if jName == "__enforcer__" {
+			return false
+		}
+		return iName < jName
+	})
 }

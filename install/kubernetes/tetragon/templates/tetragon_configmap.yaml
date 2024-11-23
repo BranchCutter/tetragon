@@ -6,10 +6,12 @@ metadata:
   labels:
   {{- include "tetragon.labels" . | nindent 4 }}
 data:
+  cluster-name: {{ .Values.tetragon.clusterName | quote }}
 {{- if .Values.tetragon.btf }}
   btf: {{ .Values.tetragon.btf }}
 {{- end }}
   procfs: /procRoot
+  debug: {{ .Values.tetragon.debug | quote }}
   enable-process-cred: {{ .Values.tetragon.enableProcessCred | quote }}
   enable-process-ns: {{ .Values.tetragon.enableProcessNs | quote }}
   process-cache-size: {{ .Values.tetragon.processCacheSize | quote }}
@@ -43,6 +45,7 @@ data:
 {{- if .Values.tetragon.grpc.enabled }}
   server-address: {{ .Values.tetragon.grpc.address }}
 {{- else }}
+  server-address: ""
 {{- end }}
 {{- if .Values.tetragon.healthGrpc.enabled }}
   health-server-address: :{{ .Values.tetragon.healthGrpc.port }}
@@ -50,10 +53,9 @@ data:
 {{- else }}
   health-server-address: ""
 {{- end }}
-{{- if .Values.tetragon.tcpStatsSampleSegs }}
-  tcp-stats-sample-segs: {{ .Values.tetragon.tcpStatsSampleSegs | quote }}
-{{- end }}
+{{- if .Values.tetragon.gops.enabled }}
   gops-address: {{ .Values.tetragon.gops.address }}:{{ .Values.tetragon.gops.port }}
+{{- end }}
 {{- if .Values.tetragon.enablePolicyFilter }}
   enable-policy-filter: "true"
 {{- end }}
@@ -65,4 +67,14 @@ data:
 {{- end }}
   enable-pod-info: {{ .Values.tetragonOperator.podInfo.enabled | quote }}
   enable-tracing-policy-crd: {{ .Values.tetragonOperator.tracingPolicy.enabled | quote }}
+{{- if .Values.tetragon.pprof.enabled }}
+  pprof-address: {{ .Values.tetragon.pprof.address }}:{{ .Values.tetragon.pprof.port }}
+{{- end }}
+  event-cache-retries: {{ .Values.tetragon.eventCacheRetries | quote }}
+  event-cache-retry-delay: {{ .Values.tetragon.eventCacheRetryDelay | quote }}
   {{- include "configmap.extra" . | nindent 2 }}
+{{- if .Values.tetragon.enableKeepSensorsOnExit }}
+  keep-sensors-on-exit: "true"
+  release-pinned-bpf: "false"
+{{- end }}
+  process-cache-gc-interval: {{ .Values.tetragon.processCacheGCInterval | quote }}

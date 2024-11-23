@@ -17,24 +17,25 @@ import (
 )
 
 const (
-	KeyConfigDir        = "config-dir"
-	KeyDebug            = "debug"
-	KeyHubbleLib        = "bpf-lib"
-	KeyBTF              = "btf"
-	KeyProcFS           = "procfs"
-	KeyKernelVersion    = "kernel"
-	KeyVerbosity        = "verbose"
-	KeyProcessCacheSize = "process-cache-size"
-	KeyDataCacheSize    = "data-cache-size"
-	KeyForceSmallProgs  = "force-small-progs"
-	KeyForceLargeProgs  = "force-large-progs"
+	KeyConfigDir              = "config-dir"
+	KeyDebug                  = "debug"
+	KeyHubbleLib              = "bpf-lib"
+	KeyBTF                    = "btf"
+	KeyProcFS                 = "procfs"
+	KeyKernelVersion          = "kernel"
+	KeyVerbosity              = "verbose"
+	KeyProcessCacheSize       = "process-cache-size"
+	KeyDataCacheSize          = "data-cache-size"
+	KeyProcessCacheGCInterval = "process-cache-gc-interval"
+	KeyForceSmallProgs        = "force-small-progs"
+	KeyForceLargeProgs        = "force-large-progs"
+	KeyClusterName            = "cluster-name"
 
 	KeyLogLevel  = "log-level"
 	KeyLogFormat = "log-format"
 
-	KeyEnableK8sAPI           = "enable-k8s-api"
-	KeyK8sKubeConfigPath      = "k8s-kubeconfig-path"
-	KeyEnableProcessAncestors = "enable-process-ancestors"
+	KeyEnableK8sAPI      = "enable-k8s-api"
+	KeyK8sKubeConfigPath = "k8s-kubeconfig-path"
 
 	KeyMetricsServer      = "metrics-server"
 	KeyMetricsLabelFilter = "metrics-label-filter"
@@ -47,7 +48,7 @@ const (
 
 	KeyCpuProfile = "cpuprofile"
 	KeyMemProfile = "memprofile"
-	KeyPprofAddr  = "pprof-addr"
+	KeyPprofAddr  = "pprof-address"
 
 	KeyExportFilename             = "export-filename"
 	KeyExportFileMaxSizeMB        = "export-file-max-size-mb"
@@ -87,13 +88,10 @@ const (
 
 	KeyEnableMsgHandlingLatency = "enable-msg-handling-latency"
 
-	KeyKmods = "kmods"
-
 	KeyEnablePodInfo          = "enable-pod-info"
 	KeyEnableTracingPolicyCRD = "enable-tracing-policy-crd"
 
-	KeyExposeStackAddresses  = "expose-stack-addresses"
-	KeyExposeKernelAddresses = "expose-kernel-addresses"
+	KeyExposeStackAddresses = "expose-stack-addresses"
 
 	KeyGenerateDocs = "generate-docs"
 
@@ -103,6 +101,21 @@ const (
 
 	KeyHealthServerAddress = "health-server-address"
 	KeyHealthTimeInterval  = "health-server-interval"
+
+	KeyBpfDir = "bpf-dir"
+
+	KeyKeepSensorsOnExit = "keep-sensors-on-exit"
+
+	KeyEnableCRI   = "enable-cri"
+	KeyCRIEndpoint = "cri-endpoint"
+
+	KeyEnableCgIDmap      = "enable-cgidmap"
+	KeyEnableCgIDmapDebug = "enable-cgidmap-debug"
+
+	KeyEventCacheRetries    = "event-cache-retries"
+	KeyEventCacheRetryDelay = "event-cache-retry-delay"
+
+	KeyCompatibilitySyscall64SizeType = "enable-compatibility-syscall64-size-type"
 )
 
 type UsernameMetadaCode int
@@ -129,6 +142,7 @@ func ReadAndSetFlags() error {
 	Config.ForceSmallProgs = viper.GetBool(KeyForceSmallProgs)
 	Config.ForceLargeProgs = viper.GetBool(KeyForceLargeProgs)
 	Config.Debug = viper.GetBool(KeyDebug)
+	Config.ClusterName = viper.GetString(KeyClusterName)
 
 	Config.EnableProcessCred = viper.GetBool(KeyEnableProcessCred)
 	Config.EnableProcessNs = viper.GetBool(KeyEnableProcessNs)
@@ -157,6 +171,11 @@ func ReadAndSetFlags() error {
 
 	Config.ProcessCacheSize = viper.GetInt(KeyProcessCacheSize)
 	Config.DataCacheSize = viper.GetInt(KeyDataCacheSize)
+	Config.ProcessCacheGCInterval = viper.GetDuration(KeyProcessCacheGCInterval)
+
+	if Config.ProcessCacheGCInterval <= 0 {
+		return fmt.Errorf("failed to parse process-cache-gc-interval value. Must be >= 0")
+	}
 
 	Config.MetricsServer = viper.GetString(KeyMetricsServer)
 	Config.MetricsLabelFilter = DefaultLabelFilter().WithEnabledLabels(ParseMetricsLabelFilter(viper.GetString(KeyMetricsLabelFilter)))
@@ -189,8 +208,6 @@ func ReadAndSetFlags() error {
 
 	Config.TracingPolicyDir = viper.GetString(KeyTracingPolicyDir)
 
-	Config.KMods = viper.GetStringSlice(KeyKmods)
-
 	Config.EnablePodInfo = viper.GetBool(KeyEnablePodInfo)
 	Config.EnableTracingPolicyCRD = viper.GetBool(KeyEnableTracingPolicyCRD)
 
@@ -205,19 +222,27 @@ func ReadAndSetFlags() error {
 		return fmt.Errorf("unknown option for %s: %q", KeyUsernameMetadata, o)
 	}
 
-	// manually handle the deprecation of --expose-kernel-addresses
-	if viper.IsSet(KeyExposeKernelAddresses) {
-		log.Warnf("Flag --%s has been deprecated, please use --%s instead", KeyExposeKernelAddresses, KeyExposeStackAddresses)
-		Config.ExposeStackAddresses = viper.GetBool(KeyExposeKernelAddresses)
-	}
-	// if both --expose-kernel-addresses and --expose-stack-addresses are set, the latter takes priority
-	if viper.IsSet(KeyExposeStackAddresses) {
-		Config.ExposeStackAddresses = viper.GetBool(KeyExposeStackAddresses)
-	}
+	Config.ExposeStackAddresses = viper.GetBool(KeyExposeStackAddresses)
 
 	Config.CgroupRate = ParseCgroupRate(viper.GetString(KeyCgroupRate))
 	Config.HealthServerAddress = viper.GetString(KeyHealthServerAddress)
 	Config.HealthServerInterval = viper.GetInt(KeyHealthTimeInterval)
+
+	Config.BpfDir = viper.GetString(KeyBpfDir)
+
+	Config.KeepSensorsOnExit = viper.GetBool(KeyKeepSensorsOnExit)
+
+	Config.EnableCRI = viper.GetBool(KeyEnableCRI)
+	Config.CRIEndpoint = viper.GetString(KeyCRIEndpoint)
+
+	Config.EnableCgIDmap = viper.GetBool(KeyEnableCgIDmap)
+	Config.EnableCgIDmapDebug = viper.GetBool(KeyEnableCgIDmapDebug)
+
+	Config.EventCacheNumRetries = viper.GetInt(KeyEventCacheRetries)
+	Config.EventCacheRetryDelay = viper.GetInt(KeyEventCacheRetryDelay)
+
+	Config.CompatibilitySyscall64SizeType = viper.GetBool(KeyCompatibilitySyscall64SizeType)
+
 	return nil
 }
 
@@ -270,12 +295,14 @@ func AddFlags(flags *pflag.FlagSet) {
 	flags.BoolP(KeyDebug, "d", false, "Enable debug messages. Equivalent to '--log-level=debug'")
 	flags.String(KeyHubbleLib, defaults.DefaultTetragonLib, "Location of Tetragon libs (btf and bpf files)")
 	flags.String(KeyBTF, "", "Location of btf")
+	flags.String(KeyClusterName, "", "Name of the cluster where Tetragon is installed")
 
 	flags.String(KeyProcFS, "/proc/", "Location of procfs to consume existing PIDs")
 	flags.String(KeyKernelVersion, "", "Kernel version")
 	flags.Int(KeyVerbosity, 0, "set verbosity level for eBPF verifier dumps. Pass 0 for silent, 1 for truncated logs, 2 for a full dump")
 	flags.Int(KeyProcessCacheSize, 65536, "Size of the process cache")
 	flags.Int(KeyDataCacheSize, 1024, "Size of the data events cache")
+	flags.Duration(KeyProcessCacheGCInterval, defaults.DefaultProcessCacheGCInterval, "Time between checking the process cache for old entries")
 	flags.Bool(KeyForceSmallProgs, false, "Force loading small programs, even in kernels with >= 5.3 versions")
 	flags.Bool(KeyForceLargeProgs, false, "Force loading large programs, even in kernels with < 5.3 versions")
 	flags.String(KeyExportFilename, "", "Filename for JSON export. Disabled by default")
@@ -289,10 +316,9 @@ func AddFlags(flags *pflag.FlagSet) {
 	flags.String(KeyLogFormat, "text", "Set log format")
 	flags.Bool(KeyEnableK8sAPI, false, "Access Kubernetes API to associate Tetragon events with Kubernetes pods")
 	flags.String(KeyK8sKubeConfigPath, "", "Absolute path of the kubernetes kubeconfig file")
-	flags.Bool(KeyEnableProcessAncestors, true, "Include ancestors in process exec events")
 	flags.String(KeyMetricsServer, "", "Metrics server address (e.g. ':2112'). Disabled by default")
 	flags.String(KeyMetricsLabelFilter, "namespace,workload,pod,binary", "Comma-separated list of enabled metrics labels. Unknown labels will be ignored.")
-	flags.String(KeyServerAddress, "localhost:54321", "gRPC server address (e.g. 'localhost:54321' or 'unix:///var/run/tetragon/tetragon.sock'")
+	flags.String(KeyServerAddress, "localhost:54321", "gRPC server address (e.g. 'localhost:54321' or 'unix:///var/run/tetragon/tetragon.sock'). An empty address disables the gRPC server")
 	flags.String(KeyGopsAddr, "", "gops server address (e.g. 'localhost:8118'). Disabled by default")
 	flags.Bool(KeyEnableProcessCred, false, "Enable process_cred events")
 	flags.Bool(KeyEnableProcessNs, false, "Enable namespace information in process_exec and process_kprobe events")
@@ -310,8 +336,7 @@ func AddFlags(flags *pflag.FlagSet) {
 	flags.String(KeyMemProfile, "", "Store MEM profile into provided file")
 	flags.MarkHidden(KeyMemProfile)
 
-	flags.String(KeyPprofAddr, "", "Profile via pprof http")
-	flags.MarkHidden(KeyPprofAddr)
+	flags.String(KeyPprofAddr, "", "Serves runtime profile data via HTTP (e.g. 'localhost:6060'). Disabled by default")
 
 	// JSON export aggregation options.
 	flags.Bool(KeyEnableExportAggregation, false, "Enable JSON export aggregation")
@@ -345,7 +370,7 @@ func AddFlags(flags *pflag.FlagSet) {
 
 	// Provide option to enable policy filtering. Because the code is new,
 	// this is set to false by default.
-	flags.Bool(KeyEnablePolicyFilter, false, "Enable policy filter code (beta)")
+	flags.Bool(KeyEnablePolicyFilter, false, "Enable policy filter code")
 	flags.Bool(KeyEnablePolicyFilterDebug, false, "Enable policy filter debug messages")
 
 	// Provide option to enable the pidSet export filters.
@@ -353,23 +378,34 @@ func AddFlags(flags *pflag.FlagSet) {
 
 	flags.Bool(KeyEnableMsgHandlingLatency, false, "Enable metrics for message handling latency")
 
-	flags.StringSlice(KeyKmods, []string{}, "List of kernel modules to load symbols from")
-
 	flags.String(KeyRBQueueSize, "65535", "Set size of channel between ring buffer and sensor go routines (default 65k, allows K/M/G suffix)")
 
 	flags.Bool(KeyEnablePodInfo, false, "Enable PodInfo custom resource")
 	flags.Bool(KeyEnableTracingPolicyCRD, true, "Enable TracingPolicy and TracingPolicyNamespaced custom resources")
 
-	flags.Bool(KeyExposeKernelAddresses, false, "Expose real kernel addresses in events stack traces")
 	flags.Bool(KeyExposeStackAddresses, false, "Expose real linear addresses in events stack traces")
-	flags.MarkHidden(KeyExposeKernelAddresses)
 
 	flags.Bool(KeyGenerateDocs, false, "Generate documentation in YAML format to stdout")
 
 	flags.String(KeyUsernameMetadata, "disabled", "Resolve UIDs to user names for processes running in host namespace")
 
-	flags.String(KeyCgroupRate, "", "Base sensor events cgroup rate <events,interval> disabled by default ('1000/1s' means rate 1000 events per second")
+	flags.String(KeyCgroupRate, "", "Base sensor events cgroup rate <events,interval> disabled by default ('1000,1s' means rate 1000 events per second)")
 
 	flags.String(KeyHealthServerAddress, ":6789", "Health server address (e.g. ':6789')(use '' to disabled it)")
 	flags.Int(KeyHealthTimeInterval, 10, "Health server interval in seconds")
+
+	flags.String(KeyBpfDir, defaults.DefaultMapPrefix, "Set tetragon bpf directory (default 'tetragon')")
+
+	flags.Bool(KeyKeepSensorsOnExit, false, "Do not unload sensors on exit")
+
+	flags.Bool(KeyEnableCRI, false, "enable CRI client for tetragon")
+	flags.String(KeyCRIEndpoint, "", "CRI endpoint")
+
+	flags.Bool(KeyEnableCgIDmap, false, "enable pod resolution via cgroup ids")
+	flags.Bool(KeyEnableCgIDmapDebug, false, "enable cgidmap debugging info")
+
+	flags.Int(KeyEventCacheRetries, defaults.DefaultEventCacheNumRetries, "Number of retries for event cache")
+	flags.Int(KeyEventCacheRetryDelay, defaults.DefaultEventCacheRetryDelay, "Delay in seconds between event cache retries")
+
+	flags.Bool(KeyCompatibilitySyscall64SizeType, false, "syscall64 type will produce output of type size (compatibility flag, will be removed in v1.4)")
 }

@@ -27,7 +27,10 @@ func New() *cobra.Command {
 		Short: "add a new sensor based on a tracing policy",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c := common.NewConnectedClient()
+			c, err := common.NewClientWithDefaultContextAndAddress()
+			if err != nil {
+				return fmt.Errorf("failed create gRPC client: %w", err)
+			}
 			defer c.Close()
 
 			yamlb, err := os.ReadFile(args[0])
@@ -53,10 +56,13 @@ func New() *cobra.Command {
 		Short: "delete a tracing policy",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c := common.NewConnectedClient()
+			c, err := common.NewClientWithDefaultContextAndAddress()
+			if err != nil {
+				return fmt.Errorf("failed create gRPC client: %w", err)
+			}
 			defer c.Close()
 
-			_, err := c.Client.DeleteTracingPolicy(c.Ctx, &tetragon.DeleteTracingPolicyRequest{
+			_, err = c.Client.DeleteTracingPolicy(c.Ctx, &tetragon.DeleteTracingPolicyRequest{
 				Name:      args[0],
 				Namespace: tpDelNamespaceFlag,
 			})
@@ -76,10 +82,13 @@ func New() *cobra.Command {
 		Long:  "Enable a disabled tracing policy. Use disable to re-disable the tracing policy.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c := common.NewConnectedClient()
+			c, err := common.NewClientWithDefaultContextAndAddress()
+			if err != nil {
+				return fmt.Errorf("failed create gRPC client: %w", err)
+			}
 			defer c.Close()
 
-			_, err := c.Client.EnableTracingPolicy(c.Ctx, &tetragon.EnableTracingPolicyRequest{
+			_, err = c.Client.EnableTracingPolicy(c.Ctx, &tetragon.EnableTracingPolicyRequest{
 				Name:      args[0],
 				Namespace: tpEnableNamespaceFlag,
 			})
@@ -99,10 +108,13 @@ func New() *cobra.Command {
 		Long:  "Disable an enabled tracing policy. Use enable to re-enable the tracing policy.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c := common.NewConnectedClient()
+			c, err := common.NewClientWithDefaultContextAndAddress()
+			if err != nil {
+				return fmt.Errorf("failed create gRPC client: %w", err)
+			}
 			defer c.Close()
 
-			_, err := c.Client.DisableTracingPolicy(c.Ctx, &tetragon.DisableTracingPolicyRequest{
+			_, err = c.Client.DisableTracingPolicy(c.Ctx, &tetragon.DisableTracingPolicyRequest{
 				Name:      args[0],
 				Namespace: tpDisableNamespaceFlag,
 			})
@@ -130,7 +142,10 @@ func New() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			c := common.NewConnectedClient()
+			c, err := common.NewClientWithDefaultContextAndAddress()
+			if err != nil {
+				return fmt.Errorf("failed create gRPC client: %w", err)
+			}
 			defer c.Close()
 
 			res, err := c.Client.ListTracingPolicies(c.Ctx, &tetragon.ListTracingPoliciesRequest{})
@@ -148,7 +163,7 @@ func New() *cobra.Command {
 			case "text":
 				// tabwriter config imitates kubectl default output, i.e. 3 spaces padding
 				w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 3, ' ', 0)
-				fmt.Fprintln(w, "ID\tNAME\tSTATE\tFILTERID\tNAMESPACE\tSENSORS")
+				fmt.Fprintln(w, "ID\tNAME\tSTATE\tFILTERID\tNAMESPACE\tSENSORS\tKERNELMEMORY")
 
 				for _, pol := range res.Policies {
 					namespace := pol.Namespace
@@ -182,13 +197,14 @@ func New() *cobra.Command {
 						}
 					}
 
-					fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\t%s\t\n",
+					fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\t%s\t%s\t\n",
 						pol.Id,
 						pol.Name,
 						strings.TrimPrefix(strings.ToLower(pol.State.String()), "tp_state_"),
 						pol.FilterId,
 						namespace,
 						sensors,
+						common.HumanizeByteCount(int(pol.KernelMemoryBytes)),
 					)
 				}
 				w.Flush()

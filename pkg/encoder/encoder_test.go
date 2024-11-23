@@ -14,13 +14,14 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/cilium/tetragon/api/v1/tetragon"
+	"github.com/cilium/tetragon/api/v1/tetragon/codegen/helpers"
 	"github.com/sryoya/protorand"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCompactEncoder_InvalidEventToString(t *testing.T) {
-	p := NewCompactEncoder(os.Stdout, Never, false, false)
+	p := NewCompactEncoder(os.Stdout, Never, false, false, false)
 
 	// should fail if the event field is nil.
 	_, err := p.EventToString(&tetragon.GetEventsResponse{})
@@ -28,7 +29,7 @@ func TestCompactEncoder_InvalidEventToString(t *testing.T) {
 }
 
 func TestCompactEncoder_ExecEventToString(t *testing.T) {
-	p := NewCompactEncoder(os.Stdout, Never, false, false)
+	p := NewCompactEncoder(os.Stdout, Never, false, false, false)
 
 	// should fail if the process field is nil.
 	_, err := p.EventToString(&tetragon.GetEventsResponse{
@@ -73,7 +74,7 @@ func TestCompactEncoder_ExecEventToString(t *testing.T) {
 }
 
 func TestCompactEncoder_ExitEventToString(t *testing.T) {
-	p := NewCompactEncoder(os.Stdout, Never, false, false)
+	p := NewCompactEncoder(os.Stdout, Never, false, false, false)
 
 	// should fail if the process field is nil.
 	_, err := p.EventToString(&tetragon.GetEventsResponse{
@@ -123,7 +124,7 @@ func TestCompactEncoder_ExitEventToString(t *testing.T) {
 }
 
 func TestCompactEncoder_KprobeEventToString(t *testing.T) {
-	p := NewCompactEncoder(os.Stdout, Never, false, false)
+	p := NewCompactEncoder(os.Stdout, Never, false, false, false)
 
 	// should fail without process field
 	_, err := p.EventToString(&tetragon.GetEventsResponse{
@@ -156,7 +157,7 @@ func TestCompactEncoder_KprobeEventToString(t *testing.T) {
 }
 
 func TestCompactEncoder_KprobeOpenEventToString(t *testing.T) {
-	p := NewCompactEncoder(os.Stdout, Never, false, false)
+	p := NewCompactEncoder(os.Stdout, Never, false, false, false)
 
 	// open without args
 	result, err := p.EventToString(&tetragon.GetEventsResponse{
@@ -200,7 +201,7 @@ func TestCompactEncoder_KprobeOpenEventToString(t *testing.T) {
 }
 
 func TestCompactEncoder_KprobeWriteEventToString(t *testing.T) {
-	p := NewCompactEncoder(os.Stdout, Never, false, false)
+	p := NewCompactEncoder(os.Stdout, Never, false, false, false)
 
 	// write without args
 	result, err := p.EventToString(&tetragon.GetEventsResponse{
@@ -245,7 +246,7 @@ func TestCompactEncoder_KprobeWriteEventToString(t *testing.T) {
 }
 
 func TestCompactEncoder_KprobeCloseEventToString(t *testing.T) {
-	p := NewCompactEncoder(os.Stdout, Never, false, false)
+	p := NewCompactEncoder(os.Stdout, Never, false, false, false)
 
 	// open without args
 	result, err := p.EventToString(&tetragon.GetEventsResponse{
@@ -288,7 +289,7 @@ func TestCompactEncoder_KprobeCloseEventToString(t *testing.T) {
 }
 
 func TestCompactEncoder_KprobeBPFEventToString(t *testing.T) {
-	p := NewCompactEncoder(os.Stdout, Never, false, false)
+	p := NewCompactEncoder(os.Stdout, Never, false, false, false)
 
 	// bpf with no args
 	result, err := p.EventToString(&tetragon.GetEventsResponse{
@@ -336,7 +337,7 @@ func TestCompactEncoder_KprobeBPFEventToString(t *testing.T) {
 }
 
 func TestCompactEncoder_KprobePerfEventAllocEventToString(t *testing.T) {
-	p := NewCompactEncoder(os.Stdout, Never, false, false)
+	p := NewCompactEncoder(os.Stdout, Never, false, false, false)
 
 	// perf event alloc with no args
 	result, err := p.EventToString(&tetragon.GetEventsResponse{
@@ -383,7 +384,7 @@ func TestCompactEncoder_KprobePerfEventAllocEventToString(t *testing.T) {
 }
 
 func TestCompactEncoder_KprobeBPFMapAllocEventToString(t *testing.T) {
-	p := NewCompactEncoder(os.Stdout, Never, false, false)
+	p := NewCompactEncoder(os.Stdout, Never, false, false, false)
 
 	// bpf map with no args
 	result, err := p.EventToString(&tetragon.GetEventsResponse{
@@ -434,7 +435,7 @@ func TestCompactEncoder_KprobeBPFMapAllocEventToString(t *testing.T) {
 
 func TestCompactEncoder_Encode(t *testing.T) {
 	var b bytes.Buffer
-	p := NewCompactEncoder(&b, Never, false, false)
+	p := NewCompactEncoder(&b, Never, false, false, false)
 
 	// invalid event
 	err := p.Encode(nil)
@@ -465,7 +466,7 @@ func TestCompactEncoder_Encode(t *testing.T) {
 
 func TestCompactEncoder_EncodeWithTimestamp(t *testing.T) {
 	var b bytes.Buffer
-	p := NewCompactEncoder(&b, Never, true, false)
+	p := NewCompactEncoder(&b, Never, true, false, false)
 
 	// invalid event
 	err := p.Encode(nil)
@@ -533,5 +534,53 @@ func FuzzProtojsonCompatibility(f *testing.F) {
 
 		assert.True(t, proto.Equal(msgJson, msgProtojson))
 		assert.True(t, proto.Equal(msg, msgProtojson))
+	})
+}
+
+func FuzzCompactEncoder(f *testing.F) {
+	for _, n := range []int64{
+		1337,
+		78776406,
+		56343416,
+		68876713,
+		51156281,
+		45544244,
+		4011756,
+	} {
+		for _, cm := range []uint8{0, 1, 2} {
+			for _, ts := range []bool{true, false} {
+				for _, st := range []bool{true, false} {
+					f.Add(n, cm, ts, st)
+				}
+			}
+		}
+	}
+	f.Fuzz(func(t *testing.T, seed int64, colorMode uint8, timestamps bool, stackTraces bool) {
+		var cm ColorMode
+		switch colorMode % 3 {
+		case 0:
+			cm = "never"
+		case 1:
+			cm = "always"
+		case 2:
+			cm = "auto"
+		default:
+			panic("unreachable")
+		}
+
+		pr := protorand.New()
+		pr.Seed(seed)
+		ev := &tetragon.GetEventsResponse{}
+		msg, err := pr.Gen(ev)
+		require.NoError(t, err)
+
+		if helpers.ResponseGetProcess(msg.(*tetragon.GetEventsResponse)) == nil {
+			t.Skipf("Empty process")
+		}
+
+		var buf1 bytes.Buffer
+		compactEncoder := NewCompactEncoder(&buf1, cm, timestamps, stackTraces, false)
+		err = compactEncoder.Encode(msg)
+		require.NoError(t, err)
 	})
 }

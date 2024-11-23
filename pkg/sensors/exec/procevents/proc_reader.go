@@ -19,6 +19,7 @@ import (
 	"github.com/cilium/tetragon/pkg/api/ops"
 	"github.com/cilium/tetragon/pkg/api/processapi"
 	"github.com/cilium/tetragon/pkg/bpf"
+	"github.com/cilium/tetragon/pkg/cgroups"
 	"github.com/cilium/tetragon/pkg/grpc/exec"
 	"github.com/cilium/tetragon/pkg/logger"
 	"github.com/cilium/tetragon/pkg/observer"
@@ -233,13 +234,20 @@ func pushExecveEvents(p procs) {
 		m.Unix.Msg.Common.Op = ops.MSG_OP_EXECVE
 		m.Unix.Msg.Common.Size = processapi.MsgUnixSize + p.psize + p.size
 
-		m.Unix.Msg.Kube.NetNS = 0
-		m.Unix.Msg.Kube.Cid = 0
 		m.Unix.Msg.Kube.Cgrpid = 0
 		if p.pid > 0 {
 			m.Unix.Kube.Docker, err = procsDockerId(p.pid)
 			if err != nil {
 				logger.GetLogger().WithError(err).Warn("Procfs execve event pods/ identifier error")
+			}
+			if m.Unix.Kube.Docker != "" {
+				if cgid, err := cgroups.CgroupIDFromPID(p.pid); err == nil {
+					m.Unix.Msg.Kube.Cgrpid = cgid
+				} else if option.Config.EnableCgIDmap {
+					// only warn if cgidmap is enabled since this is where this
+					// value is used
+					logger.GetLogger().WithError(err).WithField("pid", p.pid).Warn("failed to find cgroup id for pid")
+				}
 			}
 		}
 
@@ -281,7 +289,7 @@ func pushExecveEvents(p procs) {
 		m.Unix.Process.Filename = filename
 		m.Unix.Process.Args = args
 
-		err := userinfo.MsgToExecveAccountUnix(&m)
+		err := userinfo.MsgToExecveAccountUnix(m.Unix)
 		if err != nil {
 			logger.GetLogger().WithFields(logrus.Fields{
 				"process.pid":    p.pid,
@@ -350,7 +358,7 @@ func writeExecveMap(procs []procs) {
 		v.Namespaces.CgroupInum = p.cgroup_ns
 		v.Namespaces.UserInum = p.user_ns
 		pathLength := copy(v.Binary.Path[:], p.exe)
-		v.Binary.PathLength = int64(pathLength)
+		v.Binary.PathLength = int32(pathLength)
 
 		err := m.Put(k, v)
 		if err != nil {

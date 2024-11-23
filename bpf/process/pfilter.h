@@ -135,8 +135,8 @@ process_filter_pid(struct selector_filter *sf, __u32 *f,
 	else {
 		__u64 o = (__u64)off;
 		o = o / 4;
-		asm volatile("%[o] &= 0x3ff;\n" ::[o] "+r"(o)
-			     :);
+		asm volatile("%[o] &= 0x3ff;\n"
+			     : [o] "+r"(o));
 		sel = f[o];
 	}
 	return __process_filter_pid(sf->ty, sf->flags, sel, pid, enter);
@@ -157,8 +157,8 @@ process_filter_namespace(struct selector_filter *sf, __u32 *f,
 	else {
 		__u64 o = (__u64)off;
 		o = o / 4;
-		asm volatile("%[o] &= 0x3ff;\n" ::[o] "+r"(o)
-			     :);
+		asm volatile("%[o] &= 0x3ff;\n"
+			     : [o] "+r"(o));
 		sel = f[o];
 	}
 
@@ -281,6 +281,13 @@ process_filter_capability_change(__u32 ty, __u32 op, __u32 ns, __u64 val,
 		return PFILTER_REJECT;
 
 	icaps = init->caps.c[ty];
+
+	// When compiling bpf_generic_kprobe_v53.o with clang-18 and loading it on
+	// 5.4.278, the verifier complains than ty could be negative while in this
+	// context it's just the capability set type (effective, inheritable, or
+	// permitted), let's blindly remind the verifier it's a u32.
+	asm volatile("%[ty] &= 0xffffffff;\n"
+		     : [ty] "+r"(ty));
 	ccaps = c->c[ty];
 
 	/* we have a change in the capabilities that we care */
@@ -587,8 +594,8 @@ generic_process_filter(struct bpf_map_def *heap, struct bpf_map_def *fmap)
 		pass = selector_process_filter(f, curr, enter, msg);
 		if (pass) {
 			/* Verify lost that msg is not null here so recheck */
-			asm volatile("%[curr] &= 0x1f;\n" ::[curr] "r+"(curr)
-				     :);
+			asm volatile("%[curr] &= 0x1f;\n"
+				     : [curr] "+r"(curr));
 			sel->active[curr] = true;
 			sel->active[SELECTORS_ACTIVE] = true;
 			sel->pass |= true;

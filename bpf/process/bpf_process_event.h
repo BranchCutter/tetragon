@@ -11,14 +11,15 @@
 
 #define ENAMETOOLONG 36 /* File name too long */
 
-#define MAX_BUF_LEN 256
+#define MATCH_BINARIES_PATH_MAX_LENGTH 256
+#define MAX_BUF_LEN		       4096
 
 struct buffer_heap_map_value {
-	// Buffer is twice the needed size because of the verifier. In prepend_name
-	// unit tests, the verifier figures out that 255 is enough and that the
-	// buffer_offset will not overflow, but in the real use-case it looks like
-	// it's forgetting about that.
-	unsigned char buf[MAX_BUF_LEN * 2];
+	// Buffer need a bit more space here  because of the verifier. In
+	// prepend_name unit tests, the verifier figures out that MAX_BUF_LEN is
+	// enough and that the buffer_offset will not overflow, but in the real
+	// use-case it looks like it's forgetting about that.
+	unsigned char buf[MAX_BUF_LEN + 256];
 };
 
 struct {
@@ -118,15 +119,13 @@ prepend_name(char *buf, char **bufptr, int *buflen, const char *name, u32 namele
 
 	*buflen -= (namelen + write_slash);
 
-	// This will not happen as buffer_offset cannot be above 256 and namelen is
-	// bound to 255. Needed to make the verifier happy in older kernels.
 	if (namelen + write_slash > buffer_offset)
 		return -ENAMETOOLONG;
 
 	buffer_offset -= (namelen + write_slash);
 
 	// This will never happen. buffer_offset is the diff of the initial buffer pointer
-	// with the current buffer pointer. This will be at max 256 bytes (similar to the initial
+	// with the current buffer pointer. This will be at max 4096 bytes (similar to the initial
 	// size).
 	// Needed to bound that for probe_read call.
 	if (buffer_offset >= MAX_BUF_LEN)
@@ -138,8 +137,8 @@ prepend_name(char *buf, char **bufptr, int *buflen, const char *name, u32 namele
 	// This ensures that namelen is < 256, which is aligned with kernel's max dentry name length
 	// that is 255 (https://elixir.bootlin.com/linux/v5.10/source/include/uapi/linux/limits.h#L12).
 	// Needed to bound that for probe_read call.
-	asm volatile("%[namelen] &= 0xff;\n" ::[namelen] "+r"(namelen)
-		     :);
+	asm volatile("%[namelen] &= 0xff;\n"
+		     : [namelen] "+r"(namelen));
 	probe_read(buf + buffer_offset + write_slash, namelen * sizeof(char), name);
 
 	*bufptr = buf + buffer_offset;
@@ -381,10 +380,10 @@ getcwd(struct msg_process *curr, __u32 offset, __u32 proc_pid)
 	if (!buffer)
 		return 0;
 
-	asm volatile("%[offset] &= 0x3ff;\n" ::[offset] "+r"(offset)
-		     :);
-	asm volatile("%[size] &= 0xff;\n" ::[size] "+r"(size)
-		     :);
+	asm volatile("%[offset] &= 0x3ff;\n"
+		     : [offset] "+r"(offset));
+	asm volatile("%[size] &= 0xff;\n"
+		     : [size] "+r"(size));
 	probe_read((char *)curr + offset, size, buffer);
 
 	// Unfortunate special case for '/' where nothing was added we need
@@ -579,10 +578,10 @@ __event_get_cgroup_info(struct task_struct *task, struct msg_k8s *kube)
 	if (conf) {
 		/* Select which cgroup version */
 		cgrpfs_magic = conf->cgrp_fs_magic;
-		subsys_idx = conf->tg_cgrp_subsys_idx;
+		subsys_idx = conf->tg_cgrpv1_subsys_idx;
 	}
 
-	cgrp = get_task_cgroup(task, subsys_idx, &flags);
+	cgrp = get_task_cgroup(task, cgrpfs_magic, subsys_idx, &flags);
 	if (!cgrp)
 		return 0;
 

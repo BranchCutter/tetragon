@@ -4,6 +4,7 @@
 package cgroupratemetrics
 
 import (
+	"github.com/cilium/tetragon/pkg/metrics"
 	"github.com/cilium/tetragon/pkg/metrics/consts"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -15,8 +16,10 @@ const (
 	ThrottleStop
 	LookupFail
 	UpdateFail
+	DeleteFail
 	Check
 	Process
+	Delete
 )
 
 var totalLabelValues = map[CgroupRateType]string{
@@ -24,8 +27,10 @@ var totalLabelValues = map[CgroupRateType]string{
 	ThrottleStop:  "throttle_stop",
 	LookupFail:    "lookup_fail",
 	UpdateFail:    "update_fail",
+	DeleteFail:    "delete_fail",
 	Check:         "check",
 	Process:       "process",
+	Delete:        "delete",
 }
 
 func (e CgroupRateType) String() string {
@@ -41,8 +46,8 @@ var (
 	}, []string{"type"})
 )
 
-func InitMetrics(registry *prometheus.Registry) {
-	registry.MustRegister(CgroupRateTotal)
+func RegisterMetrics(group metrics.Group) {
+	group.MustRegister(CgroupRateTotal)
 }
 
 // Get a new handle on an ErrorTotal metric for an ErrorType

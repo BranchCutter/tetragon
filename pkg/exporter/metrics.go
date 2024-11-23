@@ -6,6 +6,7 @@ package exporter
 import (
 	"io"
 
+	"github.com/cilium/tetragon/pkg/metrics"
 	"github.com/cilium/tetragon/pkg/metrics/consts"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -28,12 +29,22 @@ var (
 		Name:      "events_last_exported_timestamp",
 		Help:      "Timestamp of the most recent event to be exported",
 	})
+
+	rateLimitDropped = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace:   consts.MetricsNamespace,
+		Name:        "export_ratelimit_events_dropped_total",
+		Help:        "Number of events dropped on export due to rate limiting",
+		ConstLabels: nil,
+	})
 )
 
-func InitMetrics(registry *prometheus.Registry) {
-	registry.MustRegister(eventsExportedTotal)
-	registry.MustRegister(eventsExportedBytesTotal)
-	registry.MustRegister(eventsExportTimestamp)
+func RegisterMetrics(group metrics.Group) {
+	group.MustRegister(
+		eventsExportedTotal,
+		eventsExportedBytesTotal,
+		eventsExportTimestamp,
+		rateLimitDropped,
+	)
 }
 
 func newExportedBytesCounterWriter(w io.Writer, c prometheus.Counter) io.Writer {

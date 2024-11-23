@@ -8,6 +8,7 @@ package helpers
 import (
 	fmt "fmt"
 	tetragon "github.com/cilium/tetragon/api/v1/tetragon"
+	proto "google.golang.org/protobuf/proto"
 )
 
 // ResponseTypeString returns an event's type as a string
@@ -36,6 +37,8 @@ func ResponseTypeString(response *tetragon.GetEventsResponse) (string, error) {
 		return tetragon.EventType_PROCESS_UPROBE.String(), nil
 	case *tetragon.GetEventsResponse_ProcessThrottle:
 		return tetragon.EventType_PROCESS_THROTTLE.String(), nil
+	case *tetragon.GetEventsResponse_ProcessLsm:
+		return tetragon.EventType_PROCESS_LSM.String(), nil
 	case *tetragon.GetEventsResponse_Test:
 		return tetragon.EventType_TEST.String(), nil
 	case *tetragon.GetEventsResponse_RateLimitInfo:
@@ -72,6 +75,8 @@ func ResponseInnerGetProcess(event tetragon.IsGetEventsResponse_Event) *tetragon
 		return ev.ProcessTracepoint.Process
 	case *tetragon.GetEventsResponse_ProcessUprobe:
 		return ev.ProcessUprobe.Process
+	case *tetragon.GetEventsResponse_ProcessLsm:
+		return ev.ProcessLsm.Process
 	case *tetragon.GetEventsResponse_ProcessLoader:
 		return ev.ProcessLoader.Process
 
@@ -115,7 +120,43 @@ func ResponseInnerGetParent(event tetragon.IsGetEventsResponse_Event) *tetragon.
 		return ev.ProcessTracepoint.Parent
 	case *tetragon.GetEventsResponse_ProcessUprobe:
 		return ev.ProcessUprobe.Parent
+	case *tetragon.GetEventsResponse_ProcessLsm:
+		return ev.ProcessLsm.Parent
 
 	}
 	return nil
+}
+
+// ResponseTypeMap returns a map from event field names (e.g. "process_exec") to corresponding
+// protobuf messages (e.g. &tetragon.ProcessExec{}).
+func ResponseTypeMap() map[string]proto.Message {
+	return map[string]proto.Message{
+		"process_exec":       &tetragon.ProcessExec{},
+		"process_exit":       &tetragon.ProcessExit{},
+		"process_kprobe":     &tetragon.ProcessKprobe{},
+		"process_tracepoint": &tetragon.ProcessTracepoint{},
+		"process_loader":     &tetragon.ProcessLoader{},
+		"process_uprobe":     &tetragon.ProcessUprobe{},
+		"process_throttle":   &tetragon.ProcessThrottle{},
+		"process_lsm":        &tetragon.ProcessLsm{},
+		"test":               &tetragon.Test{},
+		"rate_limit_info":    &tetragon.RateLimitInfo{},
+	}
+}
+
+// ProcessEventMap returns a map from event field names (e.g. "process_exec") to corresponding
+// protobuf messages in a given tetragon.GetEventsResponse (e.g. response.GetProcessExec()).
+func ProcessEventMap(response *tetragon.GetEventsResponse) map[string]any {
+	return map[string]any{
+		"process_exec":       response.GetProcessExec(),
+		"process_exit":       response.GetProcessExit(),
+		"process_kprobe":     response.GetProcessKprobe(),
+		"process_tracepoint": response.GetProcessTracepoint(),
+		"process_loader":     response.GetProcessLoader(),
+		"process_uprobe":     response.GetProcessUprobe(),
+		"process_throttle":   response.GetProcessThrottle(),
+		"process_lsm":        response.GetProcessLsm(),
+		"test":               response.GetTest(),
+		"rate_limit_info":    response.GetRateLimitInfo(),
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/cilium/tetragon/pkg/defaults"
 	"github.com/cilium/tetragon/pkg/logger"
 	"github.com/cilium/tetragon/pkg/metrics"
 	"github.com/spf13/viper"
@@ -24,6 +25,7 @@ type config struct {
 	Verbosity       int
 	ForceSmallProgs bool
 	ForceLargeProgs bool
+	ClusterName     string
 
 	EnableProcessNs   bool
 	EnableProcessCred bool
@@ -34,6 +36,8 @@ type config struct {
 
 	GopsAddr string
 
+	// On start used to store bpf prefix for --bpf-dir option,
+	// then it's updated to cary the whole path
 	BpfDir string
 
 	LogOpts map[string]string
@@ -42,8 +46,9 @@ type config struct {
 	RBSizeTotal int
 	RBQueueSize int
 
-	ProcessCacheSize int
-	DataCacheSize    int
+	ProcessCacheSize       int
+	DataCacheSize          int
+	ProcessCacheGCInterval time.Duration
 
 	MetricsServer      string
 	MetricsLabelFilter metrics.LabelFilter
@@ -79,8 +84,6 @@ type config struct {
 
 	EnableMsgHandlingLatency bool
 
-	KMods []string
-
 	EnablePodInfo          bool
 	EnableTracingPolicyCRD bool
 
@@ -92,6 +95,19 @@ type config struct {
 
 	HealthServerAddress  string
 	HealthServerInterval int
+
+	KeepSensorsOnExit bool
+
+	EnableCRI   bool
+	CRIEndpoint string
+
+	EnableCgIDmap      bool
+	EnableCgIDmapDebug bool
+
+	EventCacheNumRetries int
+	EventCacheRetryDelay int
+
+	CompatibilitySyscall64SizeType bool
 }
 
 var (
@@ -109,6 +125,11 @@ var (
 
 		// Enable all metrics labels by default
 		MetricsLabelFilter: DefaultLabelFilter(),
+
+		// set default valus for the event cache
+		// mainly used in the case of testing
+		EventCacheNumRetries: defaults.DefaultEventCacheNumRetries,
+		EventCacheRetryDelay: defaults.DefaultEventCacheRetryDelay,
 	}
 )
 

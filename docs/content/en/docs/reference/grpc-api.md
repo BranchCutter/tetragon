@@ -94,6 +94,94 @@ Reasons of why the process privileges changed.
 | SecBitNoCapAmbientRaise | 64 | When set, a process cannot add new capabilities to its ambient set. |
 | SecBitNoCapAmbientRaiseLocked | 128 | Make bit-6 SecBitNoCapAmbientRaise immutable |
 
+<a name="tetragon_bpf-proto"></a>
+
+## tetragon/bpf.proto
+
+<a name="tetragon-BpfCmd"></a>
+
+### BpfCmd
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| BPF_MAP_CREATE | 0 | Create a map and return a file descriptor that refers to the map. |
+| BPF_MAP_LOOKUP_ELEM | 1 | Look up an element with a given key in the map referred to by the file descriptor map_fd. |
+| BPF_MAP_UPDATE_ELEM | 2 | Create or update an element (key/value pair) in a specified map. |
+| BPF_MAP_DELETE_ELEM | 3 | Look up and delete an element by key in a specified map. |
+| BPF_MAP_GET_NEXT_KEY | 4 | Look up an element by key in a specified map and return the key of the next element. Can be used to iterate over all elements in the map. |
+| BPF_PROG_LOAD | 5 | Verify and load an eBPF program, returning a new file descriptor associated with the program. |
+| BPF_OBJ_PIN | 6 | Pin an eBPF program or map referred by the specified bpf_fd to the provided pathname on the filesystem. |
+| BPF_OBJ_GET | 7 | Open a file descriptor for the eBPF object pinned to the specified pathname. |
+| BPF_PROG_ATTACH | 8 | Attach an eBPF program to a target_fd at the specified attach_type hook. |
+| BPF_PROG_DETACH | 9 | Detach the eBPF program associated with the target_fd at the hook specified by attach_type. |
+| BPF_PROG_TEST_RUN | 10 | Run the eBPF program associated with the prog_fd a repeat number of times against a provided program context ctx_in and data data_in, and return the modified program context ctx_out, data_out (for example, packet data), result of the execution retval, and duration of the test run. |
+| BPF_PROG_GET_NEXT_ID | 11 | Fetch the next eBPF program currently loaded into the kernel. |
+| BPF_MAP_GET_NEXT_ID | 12 | Fetch the next eBPF map currently loaded into the kernel. |
+| BPF_PROG_GET_FD_BY_ID | 13 | Open a file descriptor for the eBPF program corresponding to prog_id. |
+| BPF_MAP_GET_FD_BY_ID | 14 | Open a file descriptor for the eBPF map corresponding to map_id. |
+| BPF_OBJ_GET_INFO_BY_FD | 15 | Obtain information about the eBPF object corresponding to bpf_fd. |
+| BPF_PROG_QUERY | 16 | Obtain information about eBPF programs associated with the specified attach_type hook. |
+| BPF_RAW_TRACEPOINT_OPEN | 17 | Attach an eBPF program to a tracepoint *name* to access kernel internal arguments of the tracepoint in their raw form. |
+| BPF_BTF_LOAD | 18 | Verify and load BPF Type Format (BTF) metadata into the kernel, returning a new file descriptor associated with the metadata. |
+| BPF_BTF_GET_FD_BY_ID | 19 | Open a file descriptor for the BPF Type Format (BTF) corresponding to btf_id. |
+| BPF_TASK_FD_QUERY | 20 | Obtain information about eBPF programs associated with the target process identified by pid and fd. |
+| BPF_MAP_LOOKUP_AND_DELETE_ELEM | 21 | Look up an element with the given key in the map referred to by the file descriptor fd, and if found, delete the element. |
+| BPF_MAP_FREEZE | 22 | Freeze the permissions of the specified map. |
+| BPF_BTF_GET_NEXT_ID | 23 | Fetch the next BPF Type Format (BTF) object currently loaded into the kernel. |
+| BPF_MAP_LOOKUP_BATCH | 24 | Iterate and fetch multiple elements in a map. |
+| BPF_MAP_LOOKUP_AND_DELETE_BATCH | 25 | Iterate and delete all elements in a map. |
+| BPF_MAP_UPDATE_BATCH | 26 | Update multiple elements in a map by key. |
+| BPF_MAP_DELETE_BATCH | 27 | Delete multiple elements in a map by key. |
+| BPF_LINK_CREATE | 28 | Attach an eBPF program to a target_fd at the specified attach_type hook and return a file descriptor handle for managing the link. |
+| BPF_LINK_UPDATE | 29 | Update the eBPF program in the specified link_fd to new_prog_fd. |
+| BPF_LINK_GET_FD_BY_ID | 30 | Open a file descriptor for the eBPF Link corresponding to link_id. |
+| BPF_LINK_GET_NEXT_ID | 31 | Fetch the next eBPF link currently loaded into the kernel. |
+| BPF_ENABLE_STATS | 32 | Enable eBPF runtime statistics gathering. |
+| BPF_ITER_CREATE | 33 | Create an iterator on top of the specified link_fd (as previously created using BPF_LINK_CREATE) and return a file descriptor that can be used to trigger the iteration. |
+| BPF_LINK_DETACH | 34 | Forcefully detach the specified link_fd from its corresponding attachment point. |
+| BPF_PROG_BIND_MAP | 35 | Bind a map to the lifetime of an eBPF program. |
+| BPF_TOKEN_CREATE | 36 | Create BPF token with embedded information about what can be passed as an extra parameter to various bpf() syscall commands to grant BPF subsystem functionality to unprivileged processes. |
+
+<a name="tetragon-BpfProgramType"></a>
+
+### BpfProgramType
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| BPF_PROG_TYPE_UNSPEC | 0 |  |
+| BPF_PROG_TYPE_SOCKET_FILTER | 1 |  |
+| BPF_PROG_TYPE_KPROBE | 2 |  |
+| BPF_PROG_TYPE_SCHED_CLS | 3 |  |
+| BPF_PROG_TYPE_SCHED_ACT | 4 |  |
+| BPF_PROG_TYPE_TRACEPOINT | 5 |  |
+| BPF_PROG_TYPE_XDP | 6 |  |
+| BPF_PROG_TYPE_PERF_EVENT | 7 |  |
+| BPF_PROG_TYPE_CGROUP_SKB | 8 |  |
+| BPF_PROG_TYPE_CGROUP_SOCK | 9 |  |
+| BPF_PROG_TYPE_LWT_IN | 10 |  |
+| BPF_PROG_TYPE_LWT_OUT | 11 |  |
+| BPF_PROG_TYPE_LWT_XMIT | 12 |  |
+| BPF_PROG_TYPE_SOCK_OPS | 13 |  |
+| BPF_PROG_TYPE_SK_SKB | 14 |  |
+| BPF_PROG_TYPE_CGROUP_DEVICE | 15 |  |
+| BPF_PROG_TYPE_SK_MSG | 16 |  |
+| BPF_PROG_TYPE_RAW_TRACEPOINT | 17 |  |
+| BPF_PROG_TYPE_CGROUP_SOCK_ADDR | 18 |  |
+| BPF_PROG_TYPE_LWT_SEG6LOCAL | 19 |  |
+| BPF_PROG_TYPE_LIRC_MODE2 | 20 |  |
+| BPF_PROG_TYPE_SK_REUSEPORT | 21 |  |
+| BPF_PROG_TYPE_FLOW_DISSECTOR | 22 |  |
+| BPF_PROG_TYPE_CGROUP_SYSCTL | 23 |  |
+| BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE | 24 |  |
+| BPF_PROG_TYPE_CGROUP_SOCKOPT | 25 |  |
+| BPF_PROG_TYPE_TRACING | 26 |  |
+| BPF_PROG_TYPE_STRUCT_OPS | 27 |  |
+| BPF_PROG_TYPE_EXT | 28 |  |
+| BPF_PROG_TYPE_LSM | 29 |  |
+| BPF_PROG_TYPE_SK_LOOKUP | 30 |  |
+| BPF_PROG_TYPE_SYSCALL | 31 |  |
+| BPF_PROG_TYPE_NETFILTER | 32 |  |
+
 <a name="tetragon_tetragon-proto"></a>
 
 ## tetragon/tetragon.proto
@@ -140,12 +228,20 @@ This is intented to be used by OCI hooks (but not limited to them) and correspon
 CreateContainer hook:
 https://github.com/opencontainers/runtime-spec/blob/main/config.md#createcontainer-hooks.
 
+The containerName, containerID, podName, podUID, and podNamespace fields are retrieved from the
+annotations as a convenience, and may be left empty if the corresponding annotations are not
+found.
+
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | cgroupsPath | [string](#string) |  | cgroupsPath is the cgroups path for the container. The path is expected to be relative to the cgroups mountpoint. See: https://github.com/opencontainers/runtime-spec/blob/58ec43f9fc39e0db229b653ae98295bfde74aeab/specs-go/config.go#L174 |
 | rootDir | [string](#string) |  | rootDir is the absolute path of the root directory of the container. See: https://github.com/opencontainers/runtime-spec/blob/main/specs-go/config.go#L174 |
 | annotations | [CreateContainer.AnnotationsEntry](#tetragon-CreateContainer-AnnotationsEntry) | repeated | annotations are the run-time annotations for the container see https://github.com/opencontainers/runtime-spec/blob/main/config.md#annotations |
 | containerName | [string](#string) |  | containerName is the name of the container |
+| containerID | [string](#string) |  | containerID is the id of the container |
+| podName | [string](#string) |  | podName is the pod name |
+| podUID | [string](#string) |  | podUID is the pod uid |
+| podNamespace | [string](#string) |  | podNamespace is the namespace of the pod |
 
 <a name="tetragon-CreateContainer-AnnotationsEntry"></a>
 
@@ -251,6 +347,8 @@ https://github.com/opencontainers/runtime-spec/blob/main/config.md#createcontain
 | cap_effective_arg | [string](#string) |  | Capabilities that are actually used in hexadecimal format. |
 | linux_binprm_arg | [KprobeLinuxBinprm](#tetragon-KprobeLinuxBinprm) |  |  |
 | net_dev_arg | [KprobeNetDev](#tetragon-KprobeNetDev) |  |  |
+| bpf_cmd_arg | [BpfCmd](#tetragon-BpfCmd) |  |  |
+| syscall_id | [SyscallId](#tetragon-SyscallId) |  |  |
 | label | [string](#string) |  |  |
 
 <a name="tetragon-KprobeBpfAttr"></a>
@@ -475,9 +573,7 @@ https://github.com/opencontainers/runtime-spec/blob/main/config.md#createcontain
 | tid | [google.protobuf.UInt32Value](#google-protobuf-UInt32Value) |  | Thread ID, note that for the thread group leader, tid is equal to pid. |
 | process_credentials | [ProcessCredentials](#tetragon-ProcessCredentials) |  | Process credentials, disabled by default, can be enabled by the `--enable-process-cred` flag. |
 | binary_properties | [BinaryProperties](#tetragon-BinaryProperties) |  | Executed binary properties. This field is only available on ProcessExec events. |
-| user | [UserRecord](#tetragon-UserRecord) |  | UserRecord contains user information about the event.
-
-UserRecord is only supported when i) Tetragon is running as a systemd service or directly on the host, and ii) when `--username-metadata` is set to &#34;unix&#34;. In this case, the information is retrieved from the traditional user database `/etc/passwd` and no name services lookups are performed. The resolution will only be attempted for processes in the host namespace. Note that this resolution happens in user-space, which means that mapping might have changed between the in-kernel BPF hook being executed and the username resolution. |
+| user | [UserRecord](#tetragon-UserRecord) |  | UserRecord contains user information about the event. It is only supported when i) Tetragon is running as a systemd service or directly on the host, and ii) when the flag `--username-metadata` is set to &#34;unix&#34;. In this case, the information is retrieved from the traditional user database `/etc/passwd` and no name services lookups are performed. The resolution will only be attempted for processes in the host namespace. Note that this resolution happens in user-space, which means that mapping might have changed between the in-kernel BPF hook being executed and the username resolution. |
 
 <a name="tetragon-ProcessCredentials"></a>
 
@@ -549,6 +645,22 @@ loader sensor event triggered for loaded binary/library
 | path | [string](#string) |  |  |
 | buildid | [bytes](#bytes) |  |  |
 
+<a name="tetragon-ProcessLsm"></a>
+
+### ProcessLsm
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| process | [Process](#tetragon-Process) |  |  |
+| parent | [Process](#tetragon-Process) |  |  |
+| function_name | [string](#string) |  | LSM hook name. |
+| policy_name | [string](#string) |  | Name of the policy that created that LSM hook. |
+| message | [string](#string) |  | Short message of the Tracing Policy to inform users what is going on. |
+| args | [KprobeArgument](#tetragon-KprobeArgument) | repeated | Arguments definition of the observed LSM hook. |
+| action | [KprobeAction](#tetragon-KprobeAction) |  | Action performed when the LSM hook matched. |
+| tags | [string](#string) | repeated | Tags of the Tracing Policy to categorize the event. |
+| ima_hash | [string](#string) |  | IMA file hash. Format algorithm:value. |
+
 <a name="tetragon-ProcessTracepoint"></a>
 
 ### ProcessTracepoint
@@ -603,6 +715,15 @@ RuntimeHookRequest synchronously propagates information to the agent about run-t
 | offset | [uint64](#uint64) |  | offset is the offset into the native instructions for the function. |
 | symbol | [string](#string) |  | symbol is the symbol name of the function. |
 | module | [string](#string) |  | module path for user space addresses. |
+
+<a name="tetragon-SyscallId"></a>
+
+### SyscallId
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [uint32](#uint32) |  |  |
+| abi | [string](#string) |  |  |
 
 <a name="tetragon-Test"></a>
 
@@ -674,7 +795,8 @@ User records
 | KPROBE_ACTION_SIGNAL | 10 | Signal action sends specified signal to the process. |
 | KPROBE_ACTION_TRACKSOCK | 11 | TrackSock action tracks socket. |
 | KPROBE_ACTION_UNTRACKSOCK | 12 | UntrackSock action un-tracks socket. |
-| KPROBE_ACTION_NOTIFYENFORCER | 13 | NotifyEnforcer action notifies killer sensor. |
+| KPROBE_ACTION_NOTIFYENFORCER | 13 | NotifyEnforcer action notifies enforcer sensor. |
+| KPROBE_ACTION_CLEANUPENFORCERNOTIFICATION | 14 | CleanupEnforcerNotification action cleanups any state left by NotifyEnforcer |
 
 <a name="tetragon-TaintedBitsType"></a>
 
@@ -771,6 +893,8 @@ Capability set to filter over. NOTE: you may specify only ONE set here.
 | policy_names | [string](#string) | repeated | Filter events by tracing policy names |
 | capabilities | [CapFilter](#tetragon-CapFilter) |  | Filter events by Linux process capability |
 | parent_binary_regex | [string](#string) | repeated | Filter parent process&#39; binary using RE2 regular expression syntax. |
+| cel_expression | [string](#string) | repeated | Filter using CEL expressions. |
+| parent_arguments_regex | [string](#string) | repeated | Filter by process.parent.arguments field using RE2 regular expression syntax: https://github.com/google/re2/wiki/Syntax |
 
 <a name="tetragon-GetEventsRequest"></a>
 
@@ -796,11 +920,13 @@ Capability set to filter over. NOTE: you may specify only ONE set here.
 | process_loader | [ProcessLoader](#tetragon-ProcessLoader) |  |  |
 | process_uprobe | [ProcessUprobe](#tetragon-ProcessUprobe) |  |  |
 | process_throttle | [ProcessThrottle](#tetragon-ProcessThrottle) |  |  |
+| process_lsm | [ProcessLsm](#tetragon-ProcessLsm) |  |  |
 | test | [Test](#tetragon-Test) |  |  |
 | rate_limit_info | [RateLimitInfo](#tetragon-RateLimitInfo) |  |  |
 | node_name | [string](#string) |  | Name of the node where this event was observed. |
 | time | [google.protobuf.Timestamp](#google-protobuf-Timestamp) |  | Timestamp at which this event was observed. For an aggregated response, this field to set to the timestamp at which the event was observed for the first time in a given aggregation time window. |
 | aggregation_info | [AggregationInfo](#tetragon-AggregationInfo) |  | aggregation_info contains information about aggregation results. This field is set only for aggregated responses. |
+| cluster_name | [string](#string) |  | Name of the cluster where this event was observed. |
 
 <a name="tetragon-ProcessThrottle"></a>
 
@@ -847,6 +973,7 @@ GetEventsResponse event oneof.
 | PROCESS_LOADER | 11 |  |
 | PROCESS_UPROBE | 12 |  |
 | PROCESS_THROTTLE | 27 |  |
+| PROCESS_LSM | 28 |  |
 | TEST | 40000 |  |
 | RATE_LIMIT_INFO | 40001 |  |
 
@@ -965,6 +1092,23 @@ Determines the behavior of a field filter
 
 ### DisableTracingPolicyResponse
 
+<a name="tetragon-DumpProcessCacheReqArgs"></a>
+
+### DumpProcessCacheReqArgs
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| skip_zero_refcnt | [bool](#bool) |  |  |
+| exclude_execve_map_processes | [bool](#bool) |  |  |
+
+<a name="tetragon-DumpProcessCacheResArgs"></a>
+
+### DumpProcessCacheResArgs
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| processes | [ProcessInternal](#tetragon-ProcessInternal) | repeated |  |
+
 <a name="tetragon-EnableSensorRequest"></a>
 
 ### EnableSensorRequest
@@ -989,6 +1133,25 @@ Determines the behavior of a field filter
 <a name="tetragon-EnableTracingPolicyResponse"></a>
 
 ### EnableTracingPolicyResponse
+
+<a name="tetragon-GetDebugRequest"></a>
+
+### GetDebugRequest
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| flag | [ConfigFlag](#tetragon-ConfigFlag) |  |  |
+| dump | [DumpProcessCacheReqArgs](#tetragon-DumpProcessCacheReqArgs) |  |  |
+
+<a name="tetragon-GetDebugResponse"></a>
+
+### GetDebugResponse
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| flag | [ConfigFlag](#tetragon-ConfigFlag) |  |  |
+| level | [LogLevel](#tetragon-LogLevel) |  |  |
+| processes | [DumpProcessCacheResArgs](#tetragon-DumpProcessCacheResArgs) |  |  |
 
 <a name="tetragon-GetStackTraceTreeRequest"></a>
 
@@ -1042,6 +1205,26 @@ Determines the behavior of a field filter
 | ----- | ---- | ----- | ----------- |
 | policies | [TracingPolicyStatus](#tetragon-TracingPolicyStatus) | repeated |  |
 
+<a name="tetragon-ProcessInternal"></a>
+
+### ProcessInternal
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| process | [Process](#tetragon-Process) |  |  |
+| color | [string](#string) |  |  |
+| refcnt | [google.protobuf.UInt32Value](#google-protobuf-UInt32Value) |  |  |
+| refcnt_ops | [ProcessInternal.RefcntOpsEntry](#tetragon-ProcessInternal-RefcntOpsEntry) | repeated | refcnt_ops is a map of operations to refcnt change keys can be: - &#34;process&#43;&#43;&#34;: process increased refcnt (i.e. this process starts) - &#34;process--&#34;: process decreased refcnt (i.e. this process exits) - &#34;parent&#43;&#43;&#34;: parent increased refcnt (i.e. a process starts that has this process as a parent) - &#34;parent--&#34;: parent decreased refcnt (i.e. a process exits that has this process as a parent) |
+
+<a name="tetragon-ProcessInternal-RefcntOpsEntry"></a>
+
+### ProcessInternal.RefcntOpsEntry
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| key | [string](#string) |  |  |
+| value | [int32](#int32) |  |  |
+
 <a name="tetragon-RemoveSensorRequest"></a>
 
 ### RemoveSensorRequest
@@ -1064,6 +1247,24 @@ Determines the behavior of a field filter
 | enabled | [bool](#bool) |  | enabled marks whether the sensor is enabled |
 | collection | [string](#string) |  | collection is the collection the sensor belongs to (typically a tracing policy) |
 
+<a name="tetragon-SetDebugRequest"></a>
+
+### SetDebugRequest
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| flag | [ConfigFlag](#tetragon-ConfigFlag) |  |  |
+| level | [LogLevel](#tetragon-LogLevel) |  |  |
+
+<a name="tetragon-SetDebugResponse"></a>
+
+### SetDebugResponse
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| flag | [ConfigFlag](#tetragon-ConfigFlag) |  |  |
+| level | [LogLevel](#tetragon-LogLevel) |  |  |
+
 <a name="tetragon-TracingPolicyStatus"></a>
 
 ### TracingPolicyStatus
@@ -1079,6 +1280,31 @@ Determines the behavior of a field filter
 | filter_id | [uint64](#uint64) |  | filter ID of the policy used for k8s filtering |
 | error | [string](#string) |  | potential error of the policy |
 | state | [TracingPolicyState](#tetragon-TracingPolicyState) |  | current state of the tracing policy |
+| kernel_memory_bytes | [uint64](#uint64) |  | the amount of kernel memory in bytes used by policy&#39;s sensors non-shared BPF maps (memlock) |
+
+<a name="tetragon-ConfigFlag"></a>
+
+### ConfigFlag
+For now, we only want to support debug-related config flags to be configurable.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| CONFIG_FLAG_LOG_LEVEL | 0 |  |
+| CONFIG_FLAG_DUMP_PROCESS_CACHE | 1 |  |
+
+<a name="tetragon-LogLevel"></a>
+
+### LogLevel
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| LOG_LEVEL_PANIC | 0 |  |
+| LOG_LEVEL_FATAL | 1 |  |
+| LOG_LEVEL_ERROR | 2 |  |
+| LOG_LEVEL_WARN | 3 |  |
+| LOG_LEVEL_INFO | 4 |  |
+| LOG_LEVEL_DEBUG | 5 |  |
+| LOG_LEVEL_TRACE | 6 |  |
 
 <a name="tetragon-TracingPolicyState"></a>
 
@@ -1104,16 +1330,18 @@ Determines the behavior of a field filter
 | GetHealth | [GetHealthStatusRequest](#tetragon-GetHealthStatusRequest) | [GetHealthStatusResponse](#tetragon-GetHealthStatusResponse) |  |
 | AddTracingPolicy | [AddTracingPolicyRequest](#tetragon-AddTracingPolicyRequest) | [AddTracingPolicyResponse](#tetragon-AddTracingPolicyResponse) |  |
 | DeleteTracingPolicy | [DeleteTracingPolicyRequest](#tetragon-DeleteTracingPolicyRequest) | [DeleteTracingPolicyResponse](#tetragon-DeleteTracingPolicyResponse) |  |
-| RemoveSensor | [RemoveSensorRequest](#tetragon-RemoveSensorRequest) | [RemoveSensorResponse](#tetragon-RemoveSensorResponse) |  |
 | ListTracingPolicies | [ListTracingPoliciesRequest](#tetragon-ListTracingPoliciesRequest) | [ListTracingPoliciesResponse](#tetragon-ListTracingPoliciesResponse) |  |
 | EnableTracingPolicy | [EnableTracingPolicyRequest](#tetragon-EnableTracingPolicyRequest) | [EnableTracingPolicyResponse](#tetragon-EnableTracingPolicyResponse) |  |
 | DisableTracingPolicy | [DisableTracingPolicyRequest](#tetragon-DisableTracingPolicyRequest) | [DisableTracingPolicyResponse](#tetragon-DisableTracingPolicyResponse) |  |
 | ListSensors | [ListSensorsRequest](#tetragon-ListSensorsRequest) | [ListSensorsResponse](#tetragon-ListSensorsResponse) |  |
 | EnableSensor | [EnableSensorRequest](#tetragon-EnableSensorRequest) | [EnableSensorResponse](#tetragon-EnableSensorResponse) |  |
 | DisableSensor | [DisableSensorRequest](#tetragon-DisableSensorRequest) | [DisableSensorResponse](#tetragon-DisableSensorResponse) |  |
+| RemoveSensor | [RemoveSensorRequest](#tetragon-RemoveSensorRequest) | [RemoveSensorResponse](#tetragon-RemoveSensorResponse) |  |
 | GetStackTraceTree | [GetStackTraceTreeRequest](#tetragon-GetStackTraceTreeRequest) | [GetStackTraceTreeResponse](#tetragon-GetStackTraceTreeResponse) |  |
 | GetVersion | [GetVersionRequest](#tetragon-GetVersionRequest) | [GetVersionResponse](#tetragon-GetVersionResponse) |  |
 | RuntimeHook | [RuntimeHookRequest](#tetragon-RuntimeHookRequest) | [RuntimeHookResponse](#tetragon-RuntimeHookResponse) |  |
+| GetDebug | [GetDebugRequest](#tetragon-GetDebugRequest) | [GetDebugResponse](#tetragon-GetDebugResponse) |  |
+| SetDebug | [SetDebugRequest](#tetragon-SetDebugRequest) | [SetDebugResponse](#tetragon-SetDebugResponse) |  |
 
 ## Scalar Value Types
 

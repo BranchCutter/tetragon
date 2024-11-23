@@ -18,43 +18,10 @@ import (
 var (
 	metricsWithPod      []*prometheus.MetricVec
 	metricsWithPodMutex sync.RWMutex
-	podQueue            workqueue.DelayingInterface
+	podQueue            workqueue.TypedDelayingInterface[any]
 	podQueueOnce        sync.Once
 	deleteDelay         = 1 * time.Minute
 )
-
-// NewCounterVecWithPod is a wrapper around prometheus.NewCounterVec that also registers the metric
-// to be cleaned up when a pod is deleted. It should be used only to register metrics that have
-// "pod" and "namespace" labels.
-func NewCounterVecWithPod(opts prometheus.CounterOpts, labels []string) *prometheus.CounterVec {
-	metric := prometheus.NewCounterVec(opts, labels)
-	metricsWithPodMutex.Lock()
-	metricsWithPod = append(metricsWithPod, metric.MetricVec)
-	metricsWithPodMutex.Unlock()
-	return metric
-}
-
-// NewGaugeVecWithPod is a wrapper around prometheus.NewGaugeVec that also registers the metric
-// to be cleaned up when a pod is deleted. It should be used only to register metrics that have
-// "pod" and "namespace" labels.
-func NewGaugeVecWithPod(opts prometheus.GaugeOpts, labels []string) *prometheus.GaugeVec {
-	metric := prometheus.NewGaugeVec(opts, labels)
-	metricsWithPodMutex.Lock()
-	metricsWithPod = append(metricsWithPod, metric.MetricVec)
-	metricsWithPodMutex.Unlock()
-	return metric
-}
-
-// NewHistogramVecWithPod is a wrapper around prometheus.NewHistogramVec that also registers the metric
-// to be cleaned up when a pod is deleted. It should be used only to register metrics that have
-// "pod" and "namespace" labels.
-func NewHistogramVecWithPod(opts prometheus.HistogramOpts, labels []string) *prometheus.HistogramVec {
-	metric := prometheus.NewHistogramVec(opts, labels)
-	metricsWithPodMutex.Lock()
-	metricsWithPod = append(metricsWithPod, metric.MetricVec)
-	metricsWithPodMutex.Unlock()
-	return metric
-}
 
 // RegisterPodDeleteHandler registers handler for deleting metrics associated
 // with deleted pods. Without it, Tetragon kept exposing stale metrics for
@@ -91,9 +58,9 @@ func RegisterPodDeleteHandler() {
 	})
 }
 
-func GetPodQueue() workqueue.DelayingInterface {
+func GetPodQueue() workqueue.TypedDelayingInterface[any] {
 	podQueueOnce.Do(func() {
-		podQueue = workqueue.NewDelayingQueue()
+		podQueue = workqueue.TypedNewDelayingQueue[any]()
 	})
 	return podQueue
 }

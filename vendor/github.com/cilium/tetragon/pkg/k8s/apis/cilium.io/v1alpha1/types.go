@@ -60,7 +60,7 @@ type KProbeArg struct {
 	// +kubebuilder:validation:Minimum=0
 	// Position of the argument.
 	Index uint32 `json:"index"`
-	// +kubebuilder:validation:Enum=auto;int;int8;uint8;int16;uint16;uint32;int32;uint64;int64;char_buf;char_iovec;size_t;skb;sock;string;fd;file;filename;path;nop;bpf_attr;perf_event;bpf_map;user_namespace;capability;kiocb;iov_iter;cred;load_info;module;syscall64;kernel_cap_t;cap_inheritable;cap_permitted;cap_effective;linux_binprm;data_loc;net_device
+	// +kubebuilder:validation:Enum=auto;int;int8;uint8;int16;uint16;uint32;int32;uint64;int64;char_buf;char_iovec;size_t;skb;sock;string;fd;file;filename;path;nop;bpf_attr;perf_event;bpf_map;user_namespace;capability;kiocb;iov_iter;cred;load_info;module;syscall64;kernel_cap_t;cap_inheritable;cap_permitted;cap_effective;linux_binprm;data_loc;net_device;bpf_cmd
 	// +kubebuilder:default=auto
 	// Argument type.
 	Type string `json:"type"`
@@ -90,11 +90,15 @@ type KProbeArg struct {
 }
 
 type BinarySelector struct {
-	// +kubebuilder:validation:Enum=In;NotIn;Prefix;NotPrefix
+	// +kubebuilder:validation:Enum=In;NotIn;Prefix;NotPrefix;Postfix;NotPostfix
 	// Filter operation.
 	Operator string `json:"operator"`
 	// Value to compare the argument against.
 	Values []string `json:"values"`
+	// In addition to binaries, match children processes of specified binaries.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	FollowChildren bool `json:"followChildren"`
 }
 
 // KProbeSelector selects function calls for kprobe based on PIDs and function arguments. The
@@ -196,7 +200,7 @@ type ArgSelector struct {
 }
 
 type ActionSelector struct {
-	// +kubebuilder:validation:Enum=Post;FollowFD;UnfollowFD;Sigkill;CopyFD;Override;GetUrl;DnsLookup;NoPost;Signal;TrackSock;UntrackSock;NotifyEnforcer
+	// +kubebuilder:validation:Enum=Post;FollowFD;UnfollowFD;Sigkill;CopyFD;Override;GetUrl;DnsLookup;NoPost;Signal;TrackSock;UntrackSock;NotifyEnforcer;CleanupEnforcerNotification
 	// Action to execute.
 	Action string `json:"action"`
 	// +kubebuilder:validation:Optional
@@ -239,6 +243,21 @@ type ActionSelector struct {
 	// +kubebuilder:validation:Optional
 	// Enable user stack trace export. Only valid with the post action.
 	UserStackTrace bool `json:"userStackTrace"`
+	// +kubebuilder:validation:Optional
+	// Enable collection of file hashes from integrity subsystem.
+	// Only valid with the post action.
+	ImaHash bool `json:"imaHash"`
+
+	// NB: Describing the use of this is complicated. It is only used when a missed enforcer
+	// notification (via the NotifyEnforcer action) is detected. In this case, we increase a
+	// counter that resides in a bpf map to track the missed notification. One of the main uses
+	// of NotifyEnforcer is for raw_syscalls/sys_enter. In this case, if we want to know what
+	// was the syscall for which we missed the notification, we need to use the value of the
+	// first argument. The value here stores the index of the argument we want to use.
+	//
+	// Given the complexity and limited use of this field, we do not expose it to users (at
+	// least for now) and set it internally as needed.
+	EnforcerNotifyActionArgIndex *uint32 `json:"-"`
 }
 
 type TracepointSpec struct {
@@ -278,6 +297,26 @@ type UProbeSpec struct {
 	// +kubebuilder:validation:Optional
 	// A list of function arguments to include in the trace output.
 	Args []KProbeArg `json:"args,omitempty"`
+	// +kubebuilder:validation:optional
+	// +kubebuilder:validation:MaxItems=16
+	// Tags to categorize the event, will be include in the event output.
+	// Maximum of 16 Tags are supported.
+	Tags []string `json:"tags,omitempty"`
+}
+
+type LsmHookSpec struct {
+	// Name of the function to apply the kprobe spec to.
+	Hook string `json:"hook"`
+	// +kubebuilder:validation:Optional
+	// A short message of 256 characters max that will be included
+	// in the event output to inform users what is going on.
+	Message string `json:"message"`
+	// +kubebuilder:validation:Optional
+	// A list of function arguments to include in the trace output.
+	Args []KProbeArg `json:"args,omitempty"`
+	// +kubebuilder:validation:Optional
+	// Selectors to apply before producing trace output. Selectors are ORed.
+	Selectors []KProbeSelector `json:"selectors,omitempty"`
 	// +kubebuilder:validation:optional
 	// +kubebuilder:validation:MaxItems=16
 	// Tags to categorize the event, will be include in the event output.
@@ -345,7 +384,7 @@ type WorkloadObjectMeta struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +kubebuilder:resource:singular="podinfo",path="podinfo",scope="Namespaced",shortName={}
+// +kubebuilder:resource:singular="podinfo",path="podinfo",scope="Namespaced",shortName={tgpi}
 
 // PodInfo is the Scheme for the Podinfo API
 type PodInfo struct {

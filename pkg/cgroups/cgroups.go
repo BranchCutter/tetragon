@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,8 +58,9 @@ const (
 type DeploymentCode int
 
 type deploymentEnv struct {
-	id  DeploymentCode
-	str string
+	id       DeploymentCode
+	str      string
+	endsWith string
 }
 
 const (
@@ -101,7 +103,9 @@ var (
 		{id: DEPLOY_CONTAINER, str: "docker"},
 		{id: DEPLOY_CONTAINER, str: "podman"},
 		{id: DEPLOY_CONTAINER, str: "libpod"},
-		{id: DEPLOY_SD_SERVICE, str: "system.slice"},
+		// If Tetragon is running as a systemd service, its
+		// cgroup path will end with .service
+		{id: DEPLOY_SD_SERVICE, endsWith: ".service"},
 		{id: DEPLOY_SD_USER, str: "user.slice"},
 	}
 
@@ -120,8 +124,8 @@ var (
 	cgrpMigrationPath string
 
 	// Cgroup Tracking Hierarchy
-	cgrpHierarchy    uint32
-	cgrpSubsystemIdx uint32
+	cgrpHierarchy      uint32 // 0 in case of cgroupv2
+	cgrpv1SubsystemIdx uint32 // Not set in case of cgroupv2
 )
 
 func (code CgroupModeCode) String() string {
@@ -183,7 +187,13 @@ func GetCgroupIdFromPath(cgroupPath string) (uint64, error) {
 	return fh.Id, nil
 }
 
-func parseCgroupSubSysIds(filePath string) error {
+// parseCgroupv1SubSysIds() parse cgroupv1 controllers and save their
+// hierarchy IDs and related css indexes.
+// If the 'memory' or 'cpuset' are not detected we fail, as we use them
+// from BPF side to gather cgroup information and we need them to be
+// exported by the kernel since their corresponding index allows us to
+// fetch the cgroup from the corresponding cgroup subsystem state.
+func parseCgroupv1SubSysIds(filePath string) error {
 	var allcontrollers []string
 
 	file, err := os.Open(filePath)
@@ -194,7 +204,6 @@ func parseCgroupSubSysIds(filePath string) error {
 	defer file.Close()
 
 	fscanner := bufio.NewScanner(file)
-	fixed := false
 	idx := 0
 	fscanner.Scan() // ignore first entry
 	for fscanner.Scan() {
@@ -211,7 +220,7 @@ func parseCgroupSubSysIds(filePath string) error {
 				/* We care only for the controllers that we want */
 				if idx >= CGROUP_SUBSYS_COUNT {
 					/* Maybe some cgroups are not upstream? */
-					return fmt.Errorf("Cgroup default subsystem '%s' is indexed at idx=%d higher than CGROUP_SUBSYS_COUNT=%d",
+					return fmt.Errorf("Cgroupv1 default subsystem '%s' is indexed at idx=%d higher than CGROUP_SUBSYS_COUNT=%d",
 						fields[0], idx, CGROUP_SUBSYS_COUNT)
 				}
 
@@ -220,12 +229,11 @@ func parseCgroupSubSysIds(filePath string) error {
 					CgroupControllers[i].Id = uint32(id)
 					CgroupControllers[i].Idx = uint32(idx)
 					CgroupControllers[i].Active = true
-					fixed = true
 				} else {
 					logger.GetLogger().WithFields(logrus.Fields{
 						"cgroup.fs":              cgroupFSPath,
 						"cgroup.controller.name": controller.Name,
-					}).WithError(err).Warnf("parsing controller line from '%s' failed", filePath)
+					}).WithError(err).Warnf("Cgroupv1 parsing controller line from '%s' failed", filePath)
 				}
 			}
 		}
@@ -235,30 +243,32 @@ func parseCgroupSubSysIds(filePath string) error {
 	logger.GetLogger().WithFields(logrus.Fields{
 		"cgroup.fs":          cgroupFSPath,
 		"cgroup.controllers": fmt.Sprintf("[%s]", strings.Join(allcontrollers, " ")),
-	}).Debugf("Cgroup available controllers")
-
-	// Could not find 'memory', 'pids' nor 'cpuset' controllers, are they compiled in?
-	if !fixed {
-		err = fmt.Errorf("detect cgroup controllers IDs from '%s' failed", filePath)
-		logger.GetLogger().WithFields(logrus.Fields{
-			"cgroup.fs": cgroupFSPath,
-		}).WithError(err).Warnf("Cgroup controllers 'memory', 'pids' and 'cpuset' are missing")
-		return err
-	}
+	}).Debugf("Cgroupv1 available controllers")
 
 	for _, controller := range CgroupControllers {
-		// Print again everything that is available or not
+		// Print again everything that is available and if not, fail with error
 		if controller.Active {
 			logger.GetLogger().WithFields(logrus.Fields{
 				"cgroup.fs":                     cgroupFSPath,
 				"cgroup.controller.name":        controller.Name,
 				"cgroup.controller.hierarchyID": controller.Id,
 				"cgroup.controller.index":       controller.Idx,
-			}).Infof("Supported cgroup controller '%s' is active on the system", controller.Name)
+			}).Infof("Cgroupv1 supported controller '%s' is active on the system", controller.Name)
 		} else {
+			var err error
 			// Warn with error
-			err = fmt.Errorf("controller '%s' is not active", controller.Name)
-			logger.GetLogger().WithField("cgroup.fs", cgroupFSPath).WithError(err).Warnf("Supported cgroup controller '%s' is not active", controller.Name)
+			if controller.Name == "memory" {
+				err = fmt.Errorf("Cgroupv1 controller 'memory' is not active, ensure kernel CONFIG_MEMCG=y and CONFIG_MEMCG_V1=y are set")
+			} else if controller.Name == "cpuset" {
+				err = fmt.Errorf("Cgroupv1 controller 'cpuset' is not active, ensure kernel CONFIG_CPUSETS=y and CONFIG_CPUSETS_V1=y are set")
+			} else {
+				logger.GetLogger().WithField("cgroup.fs", cgroupFSPath).Warnf("Cgroupv1 '%s' supported controller is missing", controller.Name)
+			}
+
+			if err != nil {
+				logger.GetLogger().WithField("cgroup.fs", cgroupFSPath).WithError(err).Warnf("Cgroupv1 '%s' supported controller is missing", controller.Name)
+				return err
+			}
 		}
 	}
 
@@ -270,7 +280,30 @@ func parseCgroupSubSysIds(filePath string) error {
 // in. We need this dynamic behavior since these controllers are
 // compile config.
 func DiscoverSubSysIds() error {
-	return parseCgroupSubSysIds(filepath.Join(option.Config.ProcFS, "cgroups"))
+	var err error
+	magic := GetCgroupFSMagic()
+	if magic == CGROUP_UNSET_VALUE {
+		magic, err = DetectCgroupFSMagic()
+		if err != nil {
+			return err
+		}
+	}
+
+	if magic == unix.CGROUP_SUPER_MAGIC {
+		return parseCgroupv1SubSysIds(filepath.Join(option.Config.ProcFS, "cgroups"))
+	} else if magic == unix.CGROUP2_SUPER_MAGIC {
+		/* Parse Root Cgroup active controllers.
+		 * This step helps debugging since we may have some
+		 * race conditions when processes are moved or spawned in their
+		 * appropriate cgroups which affect cgroup association, so
+		 * having more information on the environment helps to debug
+		 * or reproduce.
+		 */
+		path := filepath.Clean(fmt.Sprintf("%s/1/root/%s", option.Config.ProcFS, cgroupFSPath))
+		return checkCgroupv2Controllers(path)
+	}
+
+	return fmt.Errorf("could not detect Cgroup filesystem")
 }
 
 func setDeploymentMode(cgroupPath string) error {
@@ -291,7 +324,10 @@ func setDeploymentMode(cgroupPath string) error {
 
 	// Last go through the deployments
 	for _, d := range deployments {
-		if strings.Contains(cgroupPath, d.str) {
+		if d.str != "" && strings.Contains(cgroupPath, d.str) {
+			deploymentMode = d.id
+			return nil
+		} else if d.endsWith != "" && strings.HasSuffix(cgroupPath, d.endsWith) {
 			deploymentMode = d.id
 			return nil
 		}
@@ -316,21 +352,21 @@ func setCgrp2HierarchyID() {
 	cgrpHierarchy = CGROUP_DEFAULT_HIERARCHY
 }
 
-func setCgrpSubsystemIdx(controller *CgroupController) {
-	cgrpSubsystemIdx = controller.Idx
+func setCgrpv1SubsystemIdx(controller *CgroupController) {
+	cgrpv1SubsystemIdx = controller.Idx
 }
 
 // GetCgrpHierarchyID() returns the ID of the Cgroup hierarchy
-// that is used to track processes. This is used for Cgroupv1 as for
-// Cgroupv2 we run in the default hierarchy.
+// that is used to track processes. This is used mostly for
+// Cgroupv1 as for Cgroupv2 we run in the default hierarchy.
 func GetCgrpHierarchyID() uint32 {
 	return cgrpHierarchy
 }
 
 // GetCgrpSubsystemIdx() returns the Index of the subsys
 // or hierarchy to be used to track processes.
-func GetCgrpSubsystemIdx() uint32 {
-	return cgrpSubsystemIdx
+func GetCgrpv1SubsystemIdx() uint32 {
+	return cgrpv1SubsystemIdx
 }
 
 // GetCgrpControllerName() returns the name of the controller that is
@@ -338,7 +374,7 @@ func GetCgrpSubsystemIdx() uint32 {
 // track processes.
 func GetCgrpControllerName() string {
 	for _, controller := range CgroupControllers {
-		if controller.Active && controller.Idx == cgrpSubsystemIdx {
+		if controller.Active && controller.Idx == cgrpv1SubsystemIdx {
 			return controller.Name
 		}
 	}
@@ -396,7 +432,7 @@ func getValidCgroupv1Path(cgroupPaths []string) (string, error) {
 				}).Infof("Cgroupv1 controller '%s' will be used", controller.Name)
 
 				setCgrpHierarchyID(&controller)
-				setCgrpSubsystemIdx(&controller)
+				setCgrpv1SubsystemIdx(&controller)
 				logger.GetLogger().WithFields(logrus.Fields{
 					"cgroup.fs":   cgroupFSPath,
 					"cgroup.path": cgroupPath,
@@ -411,39 +447,27 @@ func getValidCgroupv1Path(cgroupPaths []string) (string, error) {
 	return "", fmt.Errorf("could not validate Cgroupv1 hierarchies")
 }
 
-// Lookup Cgroupv2 active controllers and returns one that we support
-func getCgroupv2Controller(cgroupPath string) (*CgroupController, error) {
+// Check and log Cgroupv2 active controllers
+func checkCgroupv2Controllers(cgroupPath string) error {
 	file := filepath.Join(cgroupPath, "cgroup.controllers")
 	data, err := os.ReadFile(file)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read %s: %v", file, err)
+		return fmt.Errorf("failed to read %s: %v", file, err)
 	}
 
 	activeControllers := strings.TrimRight(string(data), "\n")
 	if len(activeControllers) == 0 {
-		return nil, fmt.Errorf("no active controllers from '%s'", file)
+		return fmt.Errorf("no active controllers from '%s'", file)
 	}
 
 	logger.GetLogger().WithFields(logrus.Fields{
 		"cgroup.fs":          cgroupFSPath,
+		"cgroup.path":        cgroupPath,
 		"cgroup.controllers": strings.Fields(activeControllers),
+		"cgroup.hierarchyID": CGROUP_DEFAULT_HIERARCHY,
 	}).Info("Cgroupv2 supported controllers detected successfully")
 
-	for i, controller := range CgroupControllers {
-		if controller.Active && strings.Contains(activeControllers, controller.Name) {
-			logger.GetLogger().WithFields(logrus.Fields{
-				"cgroup.fs":                     cgroupFSPath,
-				"cgroup.controller.name":        controller.Name,
-				"cgroup.controller.hierarchyID": controller.Id,
-				"cgroup.controller.index":       controller.Idx,
-			}).Infof("Cgroupv2 controller '%s' will be used as a fallback for the default hierarchy", controller.Name)
-			return &CgroupControllers[i], nil
-		}
-	}
-
-	// Cgroupv2 hierarchy does not have the appropriate controllers.
-	// Maybe init system or any other component failed to prepare cgroups properly.
-	return nil, fmt.Errorf("Cgroupv2 no appropriate active controller")
+	return nil
 }
 
 // Validates cgroupPaths obtained from /proc/self/cgroup based on Cgroupv2
@@ -474,12 +498,15 @@ func getValidCgroupv2Path(cgroupPaths []string) (string, error) {
 				break
 			}
 
-			// This should not be necessary but there are broken setups out there
-			// without cgroupv2 default bpf helpers
-			controller, err := getCgroupv2Controller(cgroupPath)
+			// This should not be necessary but we have experienced some
+			// container cgroup association errors in the past, and also
+			// noticed some race conditions when a process is spawned into
+			// a new cgroup, so to gather more information, let's try to
+			// get the list of active cgroupv2 controllers in Tetragon
+			// context, that should be same for all other k8s hierarchy.
+			err = checkCgroupv2Controllers(cgroupPath)
 			if err != nil {
-				logger.GetLogger().WithField("cgroup.fs", cgroupFSPath).WithError(err).Warnf("Failed to detect current Cgroupv2 active controller")
-				break
+				logger.GetLogger().WithField("cgroup.fs", cgroupFSPath).WithError(err).Warnf("Cgroupv2: failed to detect current active controllers")
 			}
 
 			// Run the deployment mode detection last again, fine to rerun.
@@ -490,7 +517,6 @@ func getValidCgroupv2Path(cgroupPaths []string) (string, error) {
 			}
 
 			setCgrp2HierarchyID()
-			setCgrpSubsystemIdx(controller)
 			logger.GetLogger().WithFields(logrus.Fields{
 				"cgroup.fs":   cgroupFSPath,
 				"cgroup.path": cgroupPath,
@@ -756,4 +782,104 @@ func HostCgroupRoot() (string, error) {
 		fmt.Errorf("failed to set path %s as cgroup root %w", path2, err2),
 	)
 	return "", fmt.Errorf("failed to set cgroup root: %w", err)
+}
+
+// CgroupIDFromPID returns the cgroup id for a given pid.
+func CgroupIDFromPID(pid uint32) (uint64, error) {
+	cgroupFile := fmt.Sprintf("%s/%d/cgroup", option.Config.ProcFS, pid)
+	data, err := os.ReadFile(cgroupFile)
+	if err != nil {
+		return 0, err
+	}
+
+	pathPrefix := fmt.Sprintf("%s/1/root/sys/fs/cgroup", option.Config.ProcFS)
+
+	// pathFunc returns (true, path) if it found the proper cgroup path, or (false, "") if it
+	// did not. There are two versions of this function, one for cgroup v1 and one for cgroup
+	// v2.
+	var pathFunc func(line string) (bool, string)
+
+	switch GetCgroupMode() {
+	case CGROUP_UNDEF:
+		return 0, fmt.Errorf("cgroup mode undefined")
+	case CGROUP_UNIFIED:
+		pathFunc = func(line string) (bool, string) {
+			v2Prefix := "0::"
+			if !strings.HasPrefix(line, v2Prefix) {
+				return false, ""
+			}
+			return true, fmt.Sprintf("%s/%s", pathPrefix, line[len(v2Prefix):])
+		}
+	case CGROUP_LEGACY, CGROUP_HYBRID:
+		pathFunc = func(line string) (bool, string) {
+			// TODO: test the cgroup v1 implementation
+			v1Prefix := fmt.Sprintf("%d:%s:", GetCgrpHierarchyID(), GetCgrpControllerName())
+			if !strings.HasPrefix(line, v1Prefix) {
+				return false, ""
+			}
+			return true, fmt.Sprintf("%s/%s/%s", pathPrefix, GetCgrpControllerName(), line[len(v1Prefix):])
+		}
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var path string
+	for _, line := range lines {
+		var ok bool
+		if ok, path = pathFunc(line); ok {
+			break
+		}
+	}
+
+	if len(path) == 0 {
+		return 0, errors.New("failed to find proper cgroup")
+	}
+
+	cgID, err := GetCgroupIdFromPath(path)
+	if err != nil {
+		return 0, err
+	}
+
+	return cgID, nil
+}
+
+// GetCgroupIDFromSubCgroup deals with some idiosyncrancies of container runtimes
+//
+// Typically, the container processes run in the cgroup path specified in the OCI spec under
+// cgroupsPath. crun, however, is an exception because it uses another directory (called subgroup)
+// under the cgroupsPath:
+// https://github.com/containers/crun/blob/main/crun.1.md#runocisystemdsubgroupsubgroup.
+//
+// This function deals with this by checking for a child directory. If it finds one (and only one)
+// it uses the cgroup id from the child.
+func GetCgroupIDFromSubCgroup(p string) (uint64, error) {
+
+	getSingleDirChild := func() string {
+		var ret string
+		dentries, err := os.ReadDir(p)
+		if err != nil {
+			return ""
+		}
+		for _, dentry := range dentries {
+			if !dentry.IsDir() {
+				continue
+			}
+
+			if ret == "" {
+				ret = dentry.Name()
+			} else {
+				// NB: there are more than one directories :( nothing reasonable we
+				// can do at this point bail out
+				return ""
+			}
+		}
+
+		return ret
+	}
+
+	child := getSingleDirChild()
+	if child != "" {
+		p = filepath.Join(p, child)
+	}
+
+	return GetCgroupIdFromPath(p)
 }

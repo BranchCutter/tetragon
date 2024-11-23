@@ -37,6 +37,8 @@ import (
 	bc "github.com/cilium/tetragon/pkg/matchers/bytesmatcher"
 	lc "github.com/cilium/tetragon/pkg/matchers/listmatcher"
 	sm "github.com/cilium/tetragon/pkg/matchers/stringmatcher"
+	"github.com/cilium/tetragon/pkg/metrics/consts"
+	"github.com/cilium/tetragon/pkg/metricsconfig"
 	"github.com/cilium/tetragon/pkg/observer"
 	"github.com/cilium/tetragon/pkg/observer/observertesthelper"
 	"github.com/cilium/tetragon/pkg/option"
@@ -47,6 +49,8 @@ import (
 	"github.com/cilium/tetragon/pkg/testutils/perfring"
 	tus "github.com/cilium/tetragon/pkg/testutils/sensors"
 	"github.com/cilium/tetragon/pkg/tracingpolicy"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -3863,7 +3867,7 @@ func matchBinariesTest(t *testing.T, operator string, values []string, kpChecker
 	assert.NoError(t, err)
 }
 
-const skipMatchBinariesPrefix = "kernels without large progs do not support matchBinaries Prefix/NotPrefix"
+const skipMatchBinaries = "kernels without large progs do not support matchBinaries Prefix/NotPrefix/Postfix/NotPostfix"
 
 func TestKprobeMatchBinaries(t *testing.T) {
 	t.Run("In", func(t *testing.T) {
@@ -3874,15 +3878,86 @@ func TestKprobeMatchBinaries(t *testing.T) {
 	})
 	t.Run("Prefix", func(t *testing.T) {
 		if !kernels.EnableLargeProgs() {
-			t.Skip(skipMatchBinariesPrefix)
+			t.Skip(skipMatchBinaries)
 		}
 		matchBinariesTest(t, "Prefix", []string{"/usr/bin/t"}, createBinariesChecker("/usr/bin/tail", "/etc/passwd"))
 	})
 	t.Run("NotPrefix", func(t *testing.T) {
 		if !kernels.EnableLargeProgs() {
-			t.Skip(skipMatchBinariesPrefix)
+			t.Skip(skipMatchBinaries)
 		}
 		matchBinariesTest(t, "NotPrefix", []string{"/usr/bin/t"}, createBinariesChecker("/usr/bin/head", "/etc/passwd"))
+	})
+	t.Run("Postfix", func(t *testing.T) {
+		if !kernels.EnableLargeProgs() {
+			t.Skip(skipMatchBinaries)
+		}
+		matchBinariesTest(t, "Postfix", []string{"bin/tail"}, createBinariesChecker("/usr/bin/tail", "/etc/passwd"))
+	})
+	t.Run("NotPostfix", func(t *testing.T) {
+		if !kernels.EnableLargeProgs() {
+			t.Skip(skipMatchBinaries)
+		}
+		matchBinariesTest(t, "NotPostfix", []string{"bin/tail"}, createBinariesChecker("/usr/bin/head", "/etc/passwd"))
+	})
+}
+
+func matchBinariesLargePathTest(t *testing.T, operator string, values []string, binary string) {
+
+	var doneWG, readyWG sync.WaitGroup
+	defer doneWG.Wait()
+
+	ctx, cancel := context.WithTimeout(context.Background(), tus.Conf().CmdWaitTime)
+	defer cancel()
+
+	createCrdFile(t, getMatchBinariesCrd(operator, values))
+
+	obs, err := observertesthelper.GetDefaultObserverWithFile(t, ctx, testConfigFile, tus.Conf().TetragonLib, observertesthelper.WithMyPid())
+	if err != nil {
+		t.Fatalf("GetDefaultObserverWithFile error: %s", err)
+	}
+	observertesthelper.LoopEvents(ctx, t, &doneWG, &readyWG, obs)
+	readyWG.Wait()
+
+	if err := exec.Command(binary).Run(); err != nil {
+		t.Fatalf("failed to run true: %s", err)
+	}
+
+	checker := ec.NewUnorderedEventChecker(ec.NewProcessKprobeChecker("").
+		WithProcess(ec.NewProcessChecker().WithBinary(sm.Full(binary))).
+		WithFunctionName(sm.Full("fd_install")))
+	err = jsonchecker.JsonTestCheck(t, checker)
+	assert.NoError(t, err)
+
+}
+func TestKprobeMatchBinariesLargePath(t *testing.T) {
+	if !kernels.EnableLargeProgs() {
+		t.Skip()
+	}
+
+	// create a large temporary directory path
+	tmpDir := t.TempDir()
+	targetBinLargePath := tmpDir
+	// add (255 + 1) * 15 = 3840 chars to the path
+	// max is 4096 and we want to leave some space for the tmpdir + others
+	for range 15 {
+		targetBinLargePath += "/" + strings.Repeat("a", unix.NAME_MAX)
+	}
+	err := os.MkdirAll(targetBinLargePath, 0755)
+	require.NoError(t, err)
+
+	// copy the binary into it
+	targetBinLargePath += "/true"
+	fileExec, err := exec.LookPath("true")
+	require.NoError(t, err)
+	err = exec.Command("cp", fileExec, targetBinLargePath).Run()
+	require.NoError(t, err)
+
+	t.Run("Prefix", func(t *testing.T) {
+		matchBinariesLargePathTest(t, "Prefix", []string{tmpDir}, targetBinLargePath)
+	})
+	t.Run("Postfix", func(t *testing.T) {
+		matchBinariesLargePathTest(t, "Postfix", []string{"/true"}, targetBinLargePath)
 	})
 }
 
@@ -3898,9 +3973,9 @@ func matchBinariesPerfringTest(t *testing.T, operator string, values []string) {
 	}
 
 	option.Config.HubbleLib = tus.Conf().TetragonLib
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 	tus.LoadSensor(t, testsensor.GetTestSensor())
-	sm := tus.GetTestSensorManager(ctx, t)
+	sm := tus.GetTestSensorManager(t)
 
 	matchBinariesTracingPolicy := tracingpolicy.GenericTracingPolicy{
 		Metadata: v1.ObjectMeta{
@@ -3926,7 +4001,11 @@ func matchBinariesPerfringTest(t *testing.T, operator string, values []string) {
 	}
 
 	err := sm.Manager.AddTracingPolicy(ctx, &matchBinariesTracingPolicy)
-	assert.NoError(t, err)
+	if assert.NoError(t, err) {
+		t.Cleanup(func() {
+			sm.Manager.DeleteTracingPolicy(ctx, "match-binaries", "")
+		})
+	}
 
 	var tailPID, headPID int
 	ops := func() {
@@ -3971,9 +4050,15 @@ func TestKprobeMatchBinariesPerfring(t *testing.T) {
 	})
 	t.Run("Prefix", func(t *testing.T) {
 		if !kernels.EnableLargeProgs() {
-			t.Skip(skipMatchBinariesPrefix)
+			t.Skip(skipMatchBinaries)
 		}
 		matchBinariesPerfringTest(t, "Prefix", []string{"/usr/bin/t"})
+	})
+	t.Run("Postfix", func(t *testing.T) {
+		if !kernels.EnableLargeProgs() {
+			t.Skip(skipMatchBinaries)
+		}
+		matchBinariesPerfringTest(t, "Postfix", []string{"tail"})
 	})
 }
 
@@ -4002,9 +4087,9 @@ func TestKprobeMatchBinariesEarlyExec(t *testing.T) {
 	}
 
 	option.Config.HubbleLib = tus.Conf().TetragonLib
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 	tus.LoadSensor(t, testsensor.GetTestSensor())
-	sm := tus.GetTestSensorManager(ctx, t)
+	sm := tus.GetTestSensorManager(t)
 
 	matchBinariesTracingPolicy := tracingpolicy.GenericTracingPolicy{
 		Metadata: v1.ObjectMeta{
@@ -4031,7 +4116,11 @@ func TestKprobeMatchBinariesEarlyExec(t *testing.T) {
 	}
 
 	err = sm.Manager.AddTracingPolicy(ctx, &matchBinariesTracingPolicy)
-	assert.NoError(t, err)
+	if assert.NoError(t, err) {
+		t.Cleanup(func() {
+			sm.Manager.DeleteTracingPolicy(ctx, "match-binaries", "")
+		})
+	}
 
 	ops := func() {
 		file.WriteString("trigger!")
@@ -4053,7 +4142,7 @@ func TestKprobeMatchBinariesEarlyExec(t *testing.T) {
 // of its machinery.
 func TestKprobeMatchBinariesPrefixMatchArgs(t *testing.T) {
 	if !kernels.EnableLargeProgs() {
-		t.Skip(skipMatchBinariesPrefix)
+		t.Skip(skipMatchBinaries)
 	}
 
 	testutils.CaptureLog(t, logger.GetLogger().(*logrus.Logger))
@@ -4065,9 +4154,9 @@ func TestKprobeMatchBinariesPrefixMatchArgs(t *testing.T) {
 	}
 
 	option.Config.HubbleLib = tus.Conf().TetragonLib
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 	tus.LoadSensor(t, testsensor.GetTestSensor())
-	sm := tus.GetTestSensorManager(ctx, t)
+	sm := tus.GetTestSensorManager(t)
 
 	matchBinariesTracingPolicy := tracingpolicy.GenericTracingPolicy{
 		Metadata: v1.ObjectMeta{
@@ -4107,7 +4196,11 @@ func TestKprobeMatchBinariesPrefixMatchArgs(t *testing.T) {
 	}
 
 	err := sm.Manager.AddTracingPolicy(ctx, &matchBinariesTracingPolicy)
-	assert.NoError(t, err)
+	if assert.NoError(t, err) {
+		t.Cleanup(func() {
+			sm.Manager.DeleteTracingPolicy(ctx, "match-binaries", "")
+		})
+	}
 
 	var tailEtcPID, tailProcPID, headPID int
 	ops := func() {
@@ -4180,7 +4273,7 @@ spec:
 	if err != nil {
 		return err
 	}
-	return sens.Unload()
+	return sens.Unload(true)
 }
 
 func TestKprobeBpfAttr(t *testing.T) {
@@ -5844,15 +5937,13 @@ spec:
 	// Generate 5 datagrams
 	socket, err := net.Dial("udp", "127.0.0.1:9468")
 	if err != nil {
-		fmt.Printf("ERROR dialing socket\n")
-		panic(err)
+		t.Fatalf("failed dialing socket: %s", err)
 	}
 
 	for i := 0; i < 5; i++ {
 		_, err := socket.Write([]byte("data"))
 		if err != nil {
-			fmt.Printf("ERROR writing to socket\n")
-			panic(err)
+			t.Fatalf("failed writing to socket: %s", err)
 		}
 	}
 
@@ -5989,6 +6080,9 @@ spec:
 }
 
 func TestLinuxBinprmExtractPath(t *testing.T) {
+	if !kernels.EnableLargeProgs() {
+		t.Skip("Older kernels do not support matchArgs with linux_binprm")
+	}
 	testutils.CaptureLog(t, logger.GetLogger().(*logrus.Logger))
 	ctx, cancel := context.WithTimeout(context.Background(), tus.Conf().CmdWaitTime)
 	defer cancel()
@@ -5998,9 +6092,9 @@ func TestLinuxBinprmExtractPath(t *testing.T) {
 	}
 
 	option.Config.HubbleLib = tus.Conf().TetragonLib
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 	tus.LoadSensor(t, testsensor.GetTestSensor())
-	sm := tus.GetTestSensorManager(ctx, t)
+	sm := tus.GetTestSensorManager(t)
 
 	bprmTracingPolicy := tracingpolicy.GenericTracingPolicy{
 		Metadata: v1.ObjectMeta{
@@ -6028,7 +6122,7 @@ func TestLinuxBinprmExtractPath(t *testing.T) {
 						{
 							MatchArgs: []v1alpha1.ArgSelector{
 								{
-									Operator: "In",
+									Operator: "Equal",
 									Index:    0,
 									Values:   []string{"/usr/bin/id"},
 								},
@@ -6041,31 +6135,47 @@ func TestLinuxBinprmExtractPath(t *testing.T) {
 	}
 
 	err := sm.Manager.AddTracingPolicy(ctx, &bprmTracingPolicy)
-	assert.NoError(t, err)
+	if assert.NoError(t, err) {
+		t.Cleanup(func() {
+			sm.Manager.DeleteTracingPolicy(ctx, "bprm-extract-path", "")
+		})
+	}
 
-	command := exec.Command("/usr/bin/id")
+	targetCommand := exec.Command("/usr/bin/id")
+	filteredCommand := exec.Command("/usr/bin/uname")
 
 	ops := func() {
-		err = command.Start()
+		err = targetCommand.Start()
 		assert.NoError(t, err)
-		defer command.Process.Kill()
+		err = filteredCommand.Start()
+		assert.NoError(t, err)
+		defer targetCommand.Process.Kill()
+		defer filteredCommand.Process.Kill()
 	}
 
 	events := perfring.RunTestEvents(t, ctx, ops)
 
+	wantedEventExist := false
 	for _, ev := range events {
 		if kprobe, ok := ev.(*tracing.MsgGenericKprobeUnix); ok {
-			if int(kprobe.Msg.ProcessKey.Pid) == command.Process.Pid && kprobe.FuncName == "security_bprm_check" {
-				return
+			if int(kprobe.Msg.ProcessKey.Pid) == targetCommand.Process.Pid {
+				wantedEventExist = true
+				continue
+			}
+			if int(kprobe.Msg.ProcessKey.Pid) == filteredCommand.Process.Pid {
+				t.Error("kprobe event triggered by /usr/bin/uname should be filtered by the matchArgs selector")
+				break
 			}
 		}
 	}
-	t.Error("bprm error")
+	if !wantedEventExist {
+		t.Error("kprobe event triggered by /usr/bin/id should be present, unfiltered by the matchArgs selector")
+	}
 }
 
 // Test module loading/unloading on Ubuntu
 func TestTraceKernelModule(t *testing.T) {
-	_, err := ftrace.ReadAvailFuncs("find_module_sections")
+	_, err := ftrace.ReadAvailFuncs("^find_module_sections$")
 	if err != nil {
 		t.Skip("Skipping test: could not find find_module_sections")
 	}
@@ -6498,7 +6608,7 @@ func trigger(t *testing.T) {
 }
 
 func TestKprobeArgs(t *testing.T) {
-	_, err := ftrace.ReadAvailFuncs("bpf_fentry_test1")
+	_, err := ftrace.ReadAvailFuncs("^bpf_fentry_test1$")
 	if err != nil {
 		t.Skip("Skipping test: could not find bpf_fentry_test1")
 	}
@@ -6792,6 +6902,199 @@ spec:
 	}
 
 	checker := ec.NewUnorderedEventChecker(kpCheckers1, kpCheckers2)
+	err = jsonchecker.JsonTestCheck(t, checker)
+	assert.NoError(t, err)
+}
+
+func TestMissedProgStatsKprobeMulti(t *testing.T) {
+	var doneWG, readyWG sync.WaitGroup
+	defer doneWG.Wait()
+
+	ctx, cancel := context.WithTimeout(context.Background(), tus.Conf().CmdWaitTime)
+	defer cancel()
+
+	// we need kernel support to count the prog's missed count added in:
+	// f915fcb38553 ("bpf: Count stats for kprobe_multi programs")
+	// which was added in v6.7, adding also the kprobe-multi check
+	// just to be sure we have that
+	if !kernels.MinKernelVersion("6.7") || !bpf.HasKprobeMulti() {
+		t.Skip("Test requires kprobe multi and kernel version 6.7")
+	}
+
+	testNop := testutils.RepoRootPath("contrib/tester-progs/nop")
+
+	tracingPolicy := `
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: "syswritefollowfdpsswd"
+spec:
+  kprobes:
+  - call: "sys_read"
+    syscall: true
+    selectors:
+    - matchBinaries:
+      - operator: "In"
+        values:
+        - "` + testNop + `"
+      matchActions:
+      - action: Signal
+        argSig: 10
+  - call: "group_send_sig_info"
+    syscall: false
+`
+
+	createCrdFile(t, tracingPolicy)
+
+	obs, err := observertesthelper.GetDefaultObserverWithFile(t, ctx, testConfigFile, tus.Conf().TetragonLib)
+	if err != nil {
+		t.Fatalf("GetDefaultObserverWithFile error: %s", err)
+	}
+	observertesthelper.LoopEvents(ctx, t, &doneWG, &readyWG, obs)
+	readyWG.Wait()
+
+	if err := exec.Command(testNop).Run(); err != nil {
+		fmt.Printf("Failed to execute test binary: %s\n", err)
+	}
+
+	expected := strings.NewReader(` # HELP tetragon_missed_prog_probes_total The total number of Tetragon probe missed by program.
+# TYPE tetragon_missed_prog_probes_total counter
+tetragon_missed_prog_probes_total{attach="acct_process",policy="__base__"} 0
+tetragon_missed_prog_probes_total{attach="kprobe_multi (2 functions)",policy="syswritefollowfdpsswd"} 1
+tetragon_missed_prog_probes_total{attach="sched/sched_process_exec",policy="__base__"} 0
+tetragon_missed_prog_probes_total{attach="security_bprm_committing_creds",policy="__base__"} 0
+tetragon_missed_prog_probes_total{attach="wake_up_new_task",policy="__base__"} 0
+`)
+
+	assert.NoError(t, testutil.GatherAndCompare(metricsconfig.GetRegistry(), expected,
+		prometheus.BuildFQName(consts.MetricsNamespace, "", "missed_prog_probes_total")))
+
+}
+
+func TestKprobeBpfCmd(t *testing.T) {
+	var doneWG, readyWG sync.WaitGroup
+	defer doneWG.Wait()
+
+	ctx, cancel := context.WithTimeout(context.Background(), tus.Conf().CmdWaitTime)
+	defer cancel()
+
+	hook := `apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+ name: "bpf-cmd"
+spec:
+ kprobes:
+ - call: "security_bpf"
+   syscall: false
+   args:
+   - index: 0
+     type: "bpf_cmd"
+`
+	createCrdFile(t, hook)
+
+	obs, err := observertesthelper.GetDefaultObserverWithFile(t, ctx, testConfigFile, tus.Conf().TetragonLib, observertesthelper.WithMyPid())
+	if err != nil {
+		t.Fatalf("GetDefaultObserverWithFile error: %s", err)
+	}
+	observertesthelper.LoopEvents(ctx, t, &doneWG, &readyWG, obs)
+	readyWG.Wait()
+
+	time.Sleep(1 * time.Second)
+	err = loadTestCrd()
+	if err != nil {
+		t.Fatalf("Loading test CRD failed: %s", err)
+	}
+
+	mapCreate := ec.NewProcessKprobeChecker("").
+		WithFunctionName(sm.Full("security_bpf")).
+		WithArgs(ec.NewKprobeArgumentListMatcher().
+			WithValues(
+				ec.NewKprobeArgumentChecker().WithBpfCmdArg(tetragon.BpfCmd_BPF_MAP_CREATE),
+			),
+		)
+
+	progLoad := ec.NewProcessKprobeChecker("").
+		WithFunctionName(sm.Full("security_bpf")).
+		WithArgs(ec.NewKprobeArgumentListMatcher().
+			WithValues(
+				ec.NewKprobeArgumentChecker().WithBpfCmdArg(tetragon.BpfCmd_BPF_PROG_LOAD),
+			),
+		)
+
+	btfLoad := ec.NewProcessKprobeChecker("").
+		WithFunctionName(sm.Full("security_bpf")).
+		WithArgs(ec.NewKprobeArgumentListMatcher().
+			WithValues(
+				ec.NewKprobeArgumentChecker().WithBpfCmdArg(tetragon.BpfCmd_BPF_BTF_LOAD),
+			),
+		)
+
+	checker := ec.NewUnorderedEventChecker(mapCreate, progLoad, btfLoad)
+
+	err = jsonchecker.JsonTestCheck(t, checker)
+	assert.NoError(t, err)
+}
+
+func TestKprobeMultiSymbolInstancesOk(t *testing.T) {
+	var doneWG, readyWG sync.WaitGroup
+	defer doneWG.Wait()
+
+	ctx, cancel := context.WithTimeout(context.Background(), tus.Conf().CmdWaitTime)
+	defer cancel()
+
+	hook := `apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: "multiple-symbols"
+spec:
+  options:
+    - name: "disable-kprobe-multi"
+      value: "1"
+  kprobes:
+  - call: sys_prctl
+    args:
+    - index: 0
+      type: int64
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - "9999"
+    syscall: true
+    tags: [ "prctl_9999" ]
+  - call: sys_prctl
+    args:
+    - index: 0
+      type: int64
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - "8888"
+    syscall: true
+    tags: [ "prctl_8888" ]
+`
+	createCrdFile(t, hook)
+
+	obs, err := observertesthelper.GetDefaultObserverWithFile(t, ctx, testConfigFile, tus.Conf().TetragonLib)
+	if err != nil {
+		t.Fatalf("GetDefaultObserverWithFile error: %s", err)
+	}
+	observertesthelper.LoopEvents(ctx, t, &doneWG, &readyWG, obs)
+	readyWG.Wait()
+
+	syscall.Syscall(syscall.SYS_PRCTL, 8888, 0, 0)
+	syscall.Syscall(syscall.SYS_PRCTL, 9999, 0, 0)
+
+	kp_8888 := ec.NewProcessKprobeChecker("").
+		WithTags(ec.NewStringListMatcher().WithValues(sm.Full("prctl_8888")))
+	kp_9999 := ec.NewProcessKprobeChecker("").
+		WithTags(ec.NewStringListMatcher().WithValues(sm.Full("prctl_9999")))
+
+	checker := ec.NewUnorderedEventChecker(kp_8888, kp_9999)
+
 	err = jsonchecker.JsonTestCheck(t, checker)
 	assert.NoError(t, err)
 }

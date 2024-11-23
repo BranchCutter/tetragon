@@ -364,7 +364,7 @@ func TestEventExecveLongPath(t *testing.T) {
 	}
 
 	fmt.Printf("Path size: %d\n", len(testBin))
-	fmt.Printf("Test dir: " + testDir + "\n")
+	fmt.Printf("Test dir: %s\n", testDir)
 
 	// create directory
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -493,7 +493,7 @@ func TestEventExecveLongPathLongArgs(t *testing.T) {
 	}
 
 	fmt.Printf("Path size: %d\n", len(testBin))
-	fmt.Printf("Test dir: " + testDir + "\n")
+	fmt.Printf("Test dir: %s\n", testDir)
 
 	// create directory
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -575,7 +575,7 @@ func TestLoadInitialSensor(t *testing.T) {
 
 	tus.CheckSensorLoad([]*sensors.Sensor{sensor}, sensorMaps, sensorProgs, t)
 
-	sensor.Unload()
+	sensor.Unload(true)
 }
 
 func TestDocker(t *testing.T) {
@@ -679,7 +679,7 @@ func TestExecPerfring(t *testing.T) {
 	}
 
 	option.Config.HubbleLib = tus.Conf().TetragonLib
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 	tus.LoadSensor(t, testsensor.GetTestSensor())
 
 	ops := func() {

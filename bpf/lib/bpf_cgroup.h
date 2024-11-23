@@ -108,7 +108,7 @@ FUNC_INLINE const char *__get_cgroup_kn_name(const struct kernfs_node *kn)
 	const char *name = NULL;
 
 	if (kn)
-		probe_read(&name, sizeof(name), _(&kn->name));
+		probe_read_kernel(&name, sizeof(name), _(&kn->name));
 
 	return name;
 }
@@ -137,7 +137,7 @@ FUNC_INLINE __u64 __get_cgroup_kn_id(const struct kernfs_node *kn)
 		if (BPF_CORE_READ_INTO(&id, old_kn, id.id) != 0)
 			return 0;
 	} else {
-		probe_read(&id, sizeof(id), _(&kn->id));
+		probe_read_kernel(&id, sizeof(id), _(&kn->id));
 	}
 
 	return id;
@@ -154,7 +154,7 @@ FUNC_INLINE struct kernfs_node *__get_cgroup_kn(const struct cgroup *cgrp)
 	struct kernfs_node *kn = NULL;
 
 	if (cgrp)
-		probe_read(&kn, sizeof(cgrp->kn), _(&cgrp->kn));
+		probe_read_kernel(&kn, sizeof(cgrp->kn), _(&cgrp->kn));
 
 	return kn;
 }
@@ -183,7 +183,7 @@ FUNC_INLINE __u32 get_cgroup_hierarchy_id(const struct cgroup *cgrp)
  * @cgrp: target cgroup
  *
  * Returns a pointer to the cgroup node name on success that can
- * be read with probe_read(). NULL on failures.
+ * be read with probe_read_kernel(). NULL on failures.
  */
 FUNC_INLINE const char *get_cgroup_name(const struct cgroup *cgrp)
 {
@@ -208,7 +208,7 @@ FUNC_INLINE __u32 get_cgroup_level(const struct cgroup *cgrp)
 {
 	__u32 level = 0;
 
-	probe_read(&level, sizeof(level), _(&cgrp->level));
+	probe_read_kernel(&level, sizeof(level), _(&cgrp->level));
 	return level;
 }
 
@@ -230,14 +230,17 @@ FUNC_INLINE __u64 get_cgroup_id(const struct cgroup *cgrp)
  * get_task_cgroup() Returns the accurate or desired cgroup of the css of
  *    current task that we want to operate on.
  * @task: must be current task.
+ * @cgrpfs_ver: cgroup file system magic.
  * @subsys_idx: index of the desired cgroup_subsys_state part of css_set.
  *    Passing a zero as a subsys_idx is fine assuming you want that.
  * @error_flags: error flags that will be ORed to indicate errors on
  *   failures.
  *
- * Returns the cgroup of the css part of css_set of current task and is
- * indexed at subsys_idx on success. NULL on failures, and the error_flags
- * will be ORed to indicate the corresponding error.
+ * If on Cgroupv2 returns the default cgroup associated with the task css_set.
+ * If on Cgroupv1 returns the cgroup indexed at subsys_idx of the task
+ *    css_set.
+ * On failures NULL is returned and the error_flags is ORed to indicate the
+ *    corresponding error.
  *
  * To get cgroup and kernfs node information we want to operate on the right
  * cgroup hierarchy which is setup by user space. However due to the
@@ -247,19 +250,27 @@ FUNC_INLINE __u64 get_cgroup_id(const struct cgroup *cgrp)
  * Use this helper and pass the css index that you consider accurate and
  * which can be discovered at runtime in user space.
  * Usually it is the 'memory' or 'pids' indexes by reading /proc/cgroups
- * file where each line number is the index starting from zero without
- * counting first comment line.
+ * file in case of Cgroupv1 where each line number is the index starting
+ * from zero without counting first comment line.
  */
 FUNC_INLINE struct cgroup *
-get_task_cgroup(struct task_struct *task, __u32 subsys_idx, __u32 *error_flags)
+get_task_cgroup(struct task_struct *task, __u64 cgrpfs_ver, __u32 subsys_idx, __u32 *error_flags)
 {
 	struct cgroup_subsys_state *subsys;
 	struct css_set *cgroups;
 	struct cgroup *cgrp = NULL;
 
-	probe_read(&cgroups, sizeof(cgroups), _(&task->cgroups));
+	probe_read_kernel(&cgroups, sizeof(cgroups), _(&task->cgroups));
 	if (unlikely(!cgroups)) {
 		*error_flags |= EVENT_ERROR_CGROUPS;
+		return cgrp;
+	}
+
+	/* If we are in Cgroupv2 return the default css_set cgroup */
+	if (cgrpfs_ver == CGROUP2_SUPER_MAGIC) {
+		probe_read_kernel(&cgrp, sizeof(cgrp), _(&cgroups->dfl_cgrp));
+		if (!cgrp)
+			*error_flags |= EVENT_ERROR_CGROUP_SUBSYSCGRP;
 		return cgrp;
 	}
 
@@ -290,13 +301,13 @@ get_task_cgroup(struct task_struct *task, __u32 subsys_idx, __u32 *error_flags)
 	 * support as much as workload as possible. It also reduces errors
 	 * in a significant way.
 	 */
-	probe_read(&subsys, sizeof(subsys), _(&cgroups->subsys[subsys_idx]));
+	probe_read_kernel(&subsys, sizeof(subsys), _(&cgroups->subsys[subsys_idx]));
 	if (unlikely(!subsys)) {
 		*error_flags |= EVENT_ERROR_CGROUP_SUBSYS;
 		return cgrp;
 	}
 
-	probe_read(&cgrp, sizeof(cgrp), _(&subsys->cgroup));
+	probe_read_kernel(&cgrp, sizeof(cgrp), _(&subsys->cgroup));
 	if (!cgrp)
 		*error_flags |= EVENT_ERROR_CGROUP_SUBSYSCGRP;
 
@@ -350,7 +361,7 @@ FUNC_INLINE __u64 tg_get_current_cgroup_id(void)
 	if (conf) {
 		/* Select which cgroup version */
 		cgrpfs_magic = conf->cgrp_fs_magic;
-		subsys_idx = conf->tg_cgrp_subsys_idx;
+		subsys_idx = conf->tg_cgrpv1_subsys_idx;
 	}
 
 	/*
@@ -366,7 +377,7 @@ FUNC_INLINE __u64 tg_get_current_cgroup_id(void)
 	task = (struct task_struct *)get_current_task();
 
 	// NB: error_flags are ignored for now
-	cgrp = get_task_cgroup(task, subsys_idx, &error_flags);
+	cgrp = get_task_cgroup(task, cgrpfs_magic, subsys_idx, &error_flags);
 	if (!cgrp)
 		return 0;
 

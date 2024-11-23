@@ -43,8 +43,21 @@ const (
 	MSG_COMMON_FLAG_RETURN            = 0x1
 	MSG_COMMON_FLAG_KERNEL_STACKTRACE = 0x2
 	MSG_COMMON_FLAG_USER_STACKTRACE   = 0x4
+	MSG_COMMON_FLAG_IMA_HASH          = 0x8
 
 	BINARY_PATH_MAX_LEN = 256
+
+	STRING_POSTFIX_MAX_LENGTH = 128
+)
+
+const (
+	SentFailedUnknown = iota
+	SentFailedEnoent
+	SentFailedE2big
+	SentFailedEbusy
+	SentFailedEinval
+	SentFailedEnospc
+	SentFailedMax
 )
 
 type MsgExec struct {
@@ -81,14 +94,13 @@ type MsgCommon struct {
 }
 
 type MsgK8s struct {
-	NetNS  uint32
-	Cid    uint32
 	Cgrpid uint64
 	Docker [DOCKER_ID_LENGTH]byte
 }
 
 type MsgK8sUnix struct {
 	Docker string
+	Cgrpid uint64
 }
 
 type MsgGenericCred struct {
@@ -139,8 +151,12 @@ type MsgCapabilities struct {
 }
 
 type Binary struct {
-	PathLength int64
+	PathLength int32
+	Reversed   uint32
 	Path       [BINARY_PATH_MAX_LEN]byte
+	End        [STRING_POSTFIX_MAX_LENGTH]byte
+	End_r      [STRING_POSTFIX_MAX_LENGTH]byte
+	MBSet      uint64
 }
 
 type MsgNamespaces struct {
@@ -228,7 +244,7 @@ type MsgThrottleEvent struct {
 }
 
 type KernelStats struct {
-	SentFailed [256]uint64 `align:"sent_failed"`
+	SentFailed [256][SentFailedMax]uint64 `align:"sent_failed"`
 }
 
 type CgroupRateKey struct {

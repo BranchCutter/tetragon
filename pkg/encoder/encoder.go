@@ -88,15 +88,17 @@ type CompactEncoder struct {
 	Colorer     *Colorer
 	Timestamps  bool
 	StackTraces bool
+	ImaHash     bool
 }
 
 // NewCompactEncoder initializes and returns a pointer to CompactEncoder.
-func NewCompactEncoder(w io.Writer, colorMode ColorMode, timestamps bool, stackTraces bool) *CompactEncoder {
+func NewCompactEncoder(w io.Writer, colorMode ColorMode, timestamps bool, stackTraces bool, imaHash bool) *CompactEncoder {
 	return &CompactEncoder{
 		Writer:      w,
 		Colorer:     NewColorer(colorMode),
 		Timestamps:  timestamps,
 		StackTraces: stackTraces,
+		ImaHash:     imaHash,
 	}
 }
 
@@ -120,6 +122,12 @@ func (p *CompactEncoder) Encode(v interface{}) error {
 	// print stack trace if available
 	if p.StackTraces {
 		st := HumanStackTrace(event, p.Colorer)
+		fmt.Fprint(p.Writer, st)
+	}
+
+	// print ima hash if available
+	if p.ImaHash {
+		st := HumanIMAHash(event, p.Colorer)
 		fmt.Fprint(p.Writer, st)
 	}
 
@@ -223,9 +231,51 @@ func HumanStackTrace(response *tetragon.GetEventsResponse, colorer *Colorer) str
 	}
 	return out.String()
 }
+func HumanIMAHash(response *tetragon.GetEventsResponse, colorer *Colorer) string {
+	out := new(strings.Builder)
+	if ev, ok := response.Event.(*tetragon.GetEventsResponse_ProcessLsm); ok {
+		if ev.ProcessLsm.ImaHash != "" {
+			var path string
+			switch ev.ProcessLsm.FunctionName {
+			case "bprm_check_security":
+				fallthrough
+			case "bprm_committed_creds":
+				fallthrough
+			case "bprm_committing_creds":
+				fallthrough
+			case "bprm_creds_for_exec":
+				fallthrough
+			case "bprm_creds_from_file":
+				path = ev.ProcessLsm.Args[0].GetLinuxBinprmArg().Path
+			case "file_ioctl":
+				fallthrough
+			case "file_lock":
+				fallthrough
+			case "file_open":
+				fallthrough
+			case "file_post_open":
+				fallthrough
+			case "file_receive":
+				fallthrough
+			case "mmap_file":
+				path = ev.ProcessLsm.Args[0].GetFileArg().Path
+			default:
+			}
+			if path != "" {
+				colorer.Green.Fprintf(out, "   %s", path)
+				colorer.Blue.Fprintf(out, " %s\n", ev.ProcessLsm.ImaHash)
+			}
+		}
+	}
+	return out.String()
+}
 
 func (p *CompactEncoder) EventToString(response *tetragon.GetEventsResponse) (string, error) {
 	switch response.Event.(type) {
+	case *tetragon.GetEventsResponse_Test:
+		// This shouldn't normally be reachable since Tetragon won't generate Test
+		// events outside of specific unit tests.
+		return "TEST EVENT", nil
 	case *tetragon.GetEventsResponse_ProcessExec:
 		exec := response.GetProcessExec()
 		if exec.Process == nil {
@@ -281,7 +331,7 @@ func (p *CompactEncoder) EventToString(response *tetragon.GetEventsResponse) (st
 			return "", ErrMissingProcessInfo
 		}
 		processInfo, caps := p.Colorer.ProcessInfo(response.NodeName, kprobe.Process)
-		sc, _ := arch.CutSyscallPrefix(kprobe.FunctionName)
+		_, sc := arch.CutSyscallPrefix(kprobe.FunctionName)
 		switch sc {
 		case "sys_write":
 			event := p.Colorer.Blue.Sprintf("📝 %-7s", "write")
@@ -491,21 +541,50 @@ func (p *CompactEncoder) EventToString(response *tetragon.GetEventsResponse) (st
 			event := p.Colorer.Blue.Sprintf("⁉️ %-7s", "tracepoint")
 			return CapTrailorPrinter(fmt.Sprintf("%s %s %s %s", event, processInfo, tp.Subsys, tp.Event), caps), nil
 		}
+	case *tetragon.GetEventsResponse_ProcessUprobe:
+		uprobe := response.GetProcessUprobe()
+		if uprobe.Process == nil {
+			return "", ErrMissingProcessInfo
+		}
+		processInfo, caps := p.Colorer.ProcessInfo(response.NodeName, uprobe.Process)
+		event := p.Colorer.Blue.Sprintf("🕵️ %-7s", "uprobe")
+		return CapTrailorPrinter(fmt.Sprintf("%s %s %s %s", event, processInfo, uprobe.Path, uprobe.Symbol), caps), nil
+	case *tetragon.GetEventsResponse_ProcessLsm:
+		lsm := response.GetProcessLsm()
+		if lsm.Process == nil {
+			return "", ErrMissingProcessInfo
+		}
+		processInfo, caps := p.Colorer.ProcessInfo(response.NodeName, lsm.Process)
+		event := p.Colorer.Blue.Sprintf("🔒 %-7s", "LSM")
+		return CapTrailorPrinter(fmt.Sprintf("%s %s %s", event, processInfo, lsm.FunctionName), caps), nil
 	}
 
-	return "", ErrUnknownEventType
+	return "", fmt.Errorf("%w: %s", ErrUnknownEventType, response.EventType())
 }
 
 func rawSyscallEnter(tp *tetragon.ProcessTracepoint) string {
 	sysID := int64(-1)
+	defaultABI, err := syscallinfo.DefaultABI()
+	if err != nil {
+		return "unknown"
+	}
+	abi := defaultABI
+	// we assume that the syscall id is in the first argument
 	if len(tp.Args) > 0 && tp.Args[0] != nil {
 		if x, ok := tp.Args[0].GetArg().(*tetragon.KprobeArgument_LongArg); ok {
 			sysID = x.LongArg
+		} else if x, ok := tp.Args[0].GetArg().(*tetragon.KprobeArgument_SyscallId); ok {
+			sysID = int64(x.SyscallId.Id)
+			abi = x.SyscallId.Abi
 		}
 	}
+
 	sysName := "unknown"
-	if name := syscallinfo.GetSyscallName(int(sysID)); name != "" {
+	if name, _ := syscallinfo.GetSyscallName(abi, int(sysID)); name != "" {
 		sysName = name
+		if abi != defaultABI {
+			sysName = fmt.Sprintf("%s/%s", abi, sysName)
+		}
 		sysArgs, ok := syscallinfo.GetSyscallArgs(sysName)
 		if ok {
 			sysName += "("

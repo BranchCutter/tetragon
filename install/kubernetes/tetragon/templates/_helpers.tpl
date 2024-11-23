@@ -1,31 +1,27 @@
 {{/*
-Create chart name and version as used by the chart label.
-*/}}
-{{- define "tetragon.chart" -}}
-{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
-{{- end }}
-{{- define "tetragon-operator.chart" -}}
-{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{/*
 Common labels
 */}}
-{{- define "tetragon.labels" -}}
-helm.sh/chart: {{ include "tetragon.chart" . }}
-{{ include "tetragon.selectorLabels" . }}
-{{- if .Chart.AppVersion }}
+{{- define "commonLabels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-{{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: {{ .Chart.Name }}
+{{- end }}
+
+{{- define "tetragon.labels" -}}
+{{ include "tetragon.selectorLabels" . }}
+{{ include "commonLabels" . }}
+app.kubernetes.io/component: agent
 {{- end }}
 {{- define "tetragon-operator.labels" -}}
-helm.sh/chart: {{ include "tetragon-operator.chart" . }}
 {{ include "tetragon-operator.selectorLabels" . }}
-{{- if .Chart.AppVersion }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{ include "commonLabels" . }}
+app.kubernetes.io/component: operator
 {{- end }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- define "tetragon-rthooks.labels" -}}
+{{ include "tetragon-rthooks.selectorLabels" . }}
+{{ include "commonLabels" . }}
+app.kubernetes.io/component: rthooks
 {{- end }}
 
 {{/*
@@ -37,6 +33,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- define "tetragon-operator.selectorLabels" -}}
 app.kubernetes.io/name: "tetragon-operator"
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+{{- define "tetragon-rthooks.selectorLabels" -}}
+app.kubernetes.io/name: "tetragon-rthooks"
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
@@ -73,4 +73,18 @@ ServiceAccounts
 
 {{- define "container.tetragonOCIHookSetup.hooksPath" -}}
 {{- print "/hostHooks" -}}
+{{- end }}
+
+{{/*
+Runtime-hooks
+*/}}
+
+{{- define "rthooksInterface" -}}
+{{ $iface := .Values.rthooks.interface }}
+{{- if (eq $iface "oci-hooks") -}}
+	oci-hooks
+{{- else if (eq $iface "nri-hook") -}}
+	nri-hook
+{{- else -}}
+{{- end -}}
 {{- end }}

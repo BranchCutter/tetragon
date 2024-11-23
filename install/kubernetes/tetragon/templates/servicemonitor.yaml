@@ -9,6 +9,9 @@ metadata:
     {{- else }}
     {{- include "tetragon.labels" . | nindent 4 }}
     {{- end }}
+    {{- with .Values.tetragon.prometheus.serviceMonitor.extraLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
   name: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
 spec:
@@ -22,6 +25,10 @@ spec:
           sourceLabels:
             - __meta_kubernetes_pod_node_name
           targetLabel: node
+        - replacement: ${1}
+          sourceLabels:
+            - __meta_kubernetes_pod_name
+          targetLabel: tetragon_pod
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace }}
@@ -30,6 +37,6 @@ spec:
       {{- with .Values.serviceLabelsOverride}}
       {{- toYaml . | nindent 6 }}
       {{- else }}
-      {{- include "tetragon.labels" . | nindent 6 }}
+      {{- include "tetragon.selectorLabels" . | nindent 6 }}
       {{- end }}
 {{- end }}

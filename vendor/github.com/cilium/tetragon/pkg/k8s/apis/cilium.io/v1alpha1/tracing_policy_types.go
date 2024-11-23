@@ -37,7 +37,7 @@ const (
 // +genclient:noStatus
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +kubebuilder:resource:singular="tracingpolicy",path="tracingpolicies",scope="Cluster",shortName={}
+// +kubebuilder:resource:categories={tetragon},singular="tracingpolicy",path="tracingpolicies",scope="Cluster",shortName={tgtp}
 type TracingPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
@@ -48,7 +48,7 @@ type TracingPolicy struct {
 // +genclient
 // +genclient:noStatus
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +kubebuilder:resource:singular="tracingpolicynamespaced",path="tracingpoliciesnamespaced",scope="Namespaced",shortName={}
+// +kubebuilder:resource:categories={tetragon},singular="tracingpolicynamespaced",path="tracingpoliciesnamespaced",scope="Namespaced",shortName={tgtpn}
 type TracingPolicyNamespaced struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
@@ -85,6 +85,9 @@ type TracingPolicySpec struct {
 	// +kubebuilder:validation:Optional
 	// A list of uprobe specs.
 	UProbes []UProbeSpec `json:"uprobes,omitempty"`
+	// +kubebuilder:validation:Optional
+	// A list of uprobe specs.
+	LsmHooks []LsmHookSpec `json:"lsmhooks,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// PodSelector selects pods that this policy applies to
@@ -102,7 +105,7 @@ type TracingPolicySpec struct {
 	Lists []ListSpec `json:"lists,omitempty"`
 
 	// +kubebuilder:validation:Optional
-	// A killer spec.
+	// A enforcer spec.
 	Enforcers []EnforcerSpec `json:"enforcers,omitempty"`
 
 	// +kubebuilder:validation:Optional

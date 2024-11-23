@@ -9663,6 +9663,9 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_STRUCT_OPS = 27,
 	BPF_PROG_TYPE_EXT = 28,
 	BPF_PROG_TYPE_LSM = 29,
+	BPF_PROG_TYPE_SK_LOOKUP = 30,
+	BPF_PROG_TYPE_SYSCALL = 31,
+	BPF_PROG_TYPE_NETFILTER = 32,
 };
 
 enum bpf_attach_type {
@@ -33381,6 +33384,15 @@ struct bpf_iter_seq_task_file_info {
 	struct files_struct *files;
 	u32 tid;
 	u32 fd;
+};
+
+struct bpf_iter__bpf_prog {
+	union {
+		struct bpf_iter_meta *meta;
+	};
+	union {
+		struct bpf_prog *prog;
+	};
 };
 
 struct bpf_iter__task_file {

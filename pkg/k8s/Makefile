@@ -1,5 +1,5 @@
 # renovate: datasource=docker
-BUILDER_IMAGE=docker.io/library/golang:1.22.4@sha256:c2010b9c2342431a24a2e64e33d9eb2e484af49e72c820e200d332d214d5e61f
+BUILDER_IMAGE=docker.io/library/golang:1.23.3@sha256:73f06be4578c9987ce560087e2e2ea6485fb605e3910542cadd8fa09fc5f3e31
 GO ?= go
 
 all: generate
@@ -21,26 +21,7 @@ generate:
 .PHONY: __do_generate
 __do_generate:
 	./tools/controller-gen crd paths=./apis/... output:dir=apis/cilium.io/client/crds/v1alpha1
-	chmod +x vendor/k8s.io/code-generator/generate-internal-groups.sh
-	# Do two invocations of generate-groups.sh, one with --plural-exceptions, one without
-	export GOPATH=$$(go env GOPATH); \
-	  bash vendor/k8s.io/code-generator/generate-groups.sh deepcopy,defaulter \
-	  github.com/cilium/tetragon/pkg/k8s/client \
-	  github.com/cilium/tetragon/pkg/k8s/apis \
-	  cilium.io:v1alpha1 \
-	  --go-header-file hack/custom-boilerplate.go.txt \
-	  -o . \
-	  --trim-path-prefix github.com/cilium/tetragon/pkg/k8s \
-	  ; \
-	  bash vendor/k8s.io/code-generator/generate-groups.sh lister,informer,client \
-	  github.com/cilium/tetragon/pkg/k8s/client \
-	  github.com/cilium/tetragon/pkg/k8s/apis \
-	  cilium.io:v1alpha1 \
-	  --go-header-file hack/custom-boilerplate.go.txt \
-	  -o . \
-	  --trim-path-prefix github.com/cilium/tetragon/pkg/k8s \
-	  --plural-exceptions TracingPolicyNamespaced:TracingPoliciesNamespaced \
-	  --plural-exceptions PodInfo:PodInfo \
+	./tools/k8s-code-gen.sh
 
 .PHONY: vendor
 vendor:

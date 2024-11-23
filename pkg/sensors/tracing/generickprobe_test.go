@@ -9,13 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/tetragon/api/v1/tetragon"
 	"github.com/cilium/tetragon/pkg/bpf"
 	"github.com/cilium/tetragon/pkg/idtable"
 	"github.com/cilium/tetragon/pkg/k8s/apis/cilium.io/v1alpha1"
 	"github.com/cilium/tetragon/pkg/sensors"
-	"github.com/cilium/tetragon/pkg/sensors/base"
 	tus "github.com/cilium/tetragon/pkg/testutils/sensors"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -81,7 +82,7 @@ func Test_SensorDestroyHook(t *testing.T) {
 	// insertion in the table in AddKprobe, but this is done by the caller to
 	// have just DestroyHook that regroups all the potential multiple kprobes
 	// contained in one sensor.
-	sensor, err := createGenericKprobeSensor(spec, "test_sensor", 0, "test_policy", nil)
+	sensor, err := createGenericKprobeSensor(spec, "test_sensor", 0, "test_policy", "", nil)
 	if err != nil {
 		t.Errorf("createGenericKprobeSensor err expected: nil, got: %s", err)
 	}
@@ -105,7 +106,7 @@ func Test_SensorDestroyHook(t *testing.T) {
 
 	// Destroy should call the DestroyHook that was set in
 	// createGenericKprobeSensor and do the cleanup
-	sensor.Destroy()
+	sensor.Destroy(true)
 
 	// Table implem detail: the entry still technically exists in the table but
 	// is invalid, thus is not taken into account in the length
@@ -114,64 +115,106 @@ func Test_SensorDestroyHook(t *testing.T) {
 	}
 }
 
-// Test_Kprobe_DisableEnablePolicy tests that disabling and enabling a tracing
+const (
+	tcpConnectPolicyName      = "test"
+	tcpConnectPolicyNamespace = ""
+)
+
+var tcpConnectPolicy = v1alpha1.TracingPolicy{
+	ObjectMeta: v1.ObjectMeta{
+		Name: tcpConnectPolicyName,
+	},
+	Spec: v1alpha1.TracingPolicySpec{
+		KProbes: []v1alpha1.KProbeSpec{
+			{
+				Call:    "tcp_connect",
+				Syscall: false,
+			},
+		},
+	},
+}
+
+// Test_DisableEnablePolicy_Kprobe tests that disabling and enabling a tracing
 // policy containing a kprobe works. This is following a regression:
 // https://github.com/cilium/tetragon/issues/1489
-func Test_Kprobe_DisableEnablePolicy(t *testing.T) {
+func Test_DisableEnablePolicy_Kprobe(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 	path := bpf.MapPrefixPath()
-	mgr, err := sensors.StartSensorManager(path, nil)
+	mgr, err := sensors.StartSensorManager(path)
 	assert.NoError(t, err)
-	t.Cleanup(func() {
-		if err := mgr.StopSensorManager(ctx); err != nil {
-			panic("failed to stop sensor manager")
-		}
-	})
-
-	const policyName = "test"
-	const policyNamespace = ""
-	policy := v1alpha1.TracingPolicy{
-		ObjectMeta: v1.ObjectMeta{
-			Name: policyName,
-		},
-		Spec: v1alpha1.TracingPolicySpec{
-			KProbes: []v1alpha1.KProbeSpec{
-				{
-					Call:    "tcp_connect",
-					Syscall: false,
-				},
-			},
-		},
-	}
 
 	t.Run("sensor", func(t *testing.T) {
-		err = mgr.AddTracingPolicy(ctx, &policy)
+		err = mgr.AddTracingPolicy(ctx, &tcpConnectPolicy)
 		assert.NoError(t, err)
 		t.Cleanup(func() {
-			err = mgr.DeleteTracingPolicy(ctx, policyName, policyNamespace)
+			err = mgr.DeleteTracingPolicy(ctx, tcpConnectPolicyName, tcpConnectPolicyNamespace)
 			assert.NoError(t, err)
 		})
 
-		err = mgr.DisableSensor(ctx, policyName)
+		err = mgr.DisableSensor(ctx, tcpConnectPolicyName)
 		assert.NoError(t, err)
-		err = mgr.EnableSensor(ctx, policyName)
+		err = mgr.EnableSensor(ctx, tcpConnectPolicyName)
 		assert.NoError(t, err)
 	})
 
 	t.Run("tracing-policy", func(t *testing.T) {
-		err = mgr.AddTracingPolicy(ctx, &policy)
+		err = mgr.AddTracingPolicy(ctx, &tcpConnectPolicy)
 		assert.NoError(t, err)
 		t.Cleanup(func() {
-			err = mgr.DeleteTracingPolicy(ctx, policyName, policy.Namespace)
+			err = mgr.DeleteTracingPolicy(ctx, tcpConnectPolicyName, tcpConnectPolicyNamespace)
 			assert.NoError(t, err)
 		})
 
-		err = mgr.DisableTracingPolicy(ctx, policyName, policyNamespace)
+		err = mgr.DisableTracingPolicy(ctx, tcpConnectPolicyName, tcpConnectPolicyNamespace)
 		assert.NoError(t, err)
-		err = mgr.EnableTracingPolicy(ctx, policyName, policyNamespace)
+		err = mgr.EnableTracingPolicy(ctx, tcpConnectPolicyName, tcpConnectPolicyNamespace)
 		assert.NoError(t, err)
 	})
+}
+
+// Test_DisableEnablePolicy_KernelMemoryBytes first check that disabling and
+// enabling a policy works and then verifies that the kernel memory bytes for a
+// loaded policy is non-zero, and that for a disabled policy it's zero.
+func Test_DisableEnablePolicy_KernelMemoryBytes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tus.LoadInitialSensor(t)
+	path := bpf.MapPrefixPath()
+	mgr, err := sensors.StartSensorManager(path)
+	require.NoError(t, err)
+
+	err = mgr.AddTracingPolicy(ctx, &tcpConnectPolicy)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		err = mgr.DeleteTracingPolicy(ctx, tcpConnectPolicyName, tcpConnectPolicyNamespace)
+		assert.NoError(t, err)
+	})
+
+	list, err := mgr.ListTracingPolicies(ctx)
+	require.NoError(t, err)
+	require.Len(t, list.Policies, 1)
+	assert.Equal(t, tetragon.TracingPolicyState_TP_STATE_ENABLED, list.Policies[0].State)
+	assert.NotZero(t, list.Policies[0].KernelMemoryBytes)
+
+	err = mgr.DisableTracingPolicy(ctx, tcpConnectPolicyName, tcpConnectPolicyNamespace)
+	require.NoError(t, err)
+
+	list, err = mgr.ListTracingPolicies(ctx)
+	require.NoError(t, err)
+	require.Len(t, list.Policies, 1)
+	assert.Equal(t, tetragon.TracingPolicyState_TP_STATE_DISABLED, list.Policies[0].State)
+	assert.Zero(t, list.Policies[0].KernelMemoryBytes)
+
+	err = mgr.EnableTracingPolicy(ctx, tcpConnectPolicyName, tcpConnectPolicyNamespace)
+	require.NoError(t, err)
+
+	list, err = mgr.ListTracingPolicies(ctx)
+	require.NoError(t, err)
+	require.Len(t, list.Policies, 1)
+	assert.Equal(t, tetragon.TracingPolicyState_TP_STATE_ENABLED, list.Policies[0].State)
+	assert.NotZero(t, list.Policies[0].KernelMemoryBytes)
 }

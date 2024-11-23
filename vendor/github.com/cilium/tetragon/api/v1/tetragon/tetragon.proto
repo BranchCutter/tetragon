@@ -9,6 +9,7 @@ import "google/protobuf/wrappers.proto";
 package tetragon;
 
 import "tetragon/capabilities.proto";
+import "tetragon/bpf.proto";
 
 message Image {
     // Identifier of the container image composed of the registry path and the
@@ -270,9 +271,8 @@ message Process {
     // Executed binary properties. This field is only available on ProcessExec events.
     BinaryProperties binary_properties = 18;
     // UserRecord contains user information about the event.
-    //
-    // UserRecord is only supported when i) Tetragon is running as a systemd service or directly on the host, and
-    //  ii) when  `--username-metadata` is set to "unix". In this case, the information is retrieved from
+    // It is only supported when i) Tetragon is running as a systemd service or directly on the host, and
+    // ii) when the flag `--username-metadata` is set to "unix". In this case, the information is retrieved from
     // the traditional user database `/etc/passwd` and no name services lookups are performed.
     // The resolution will only be attempted for processes in the host namespace.
     // Note that this resolution happens in user-space, which means that mapping might have changed
@@ -404,6 +404,11 @@ message KprobeBpfMap {
     string  MapName = 5;
 }
 
+message SyscallId {
+	uint32 id = 1;
+	string abi = 2;
+}
+
 message KprobeArgument {
     oneof arg {
 	string    string_arg = 1;
@@ -432,6 +437,8 @@ message KprobeArgument {
 	string cap_effective_arg = 25; // Capabilities that are actually used in hexadecimal format.
 	KprobeLinuxBinprm linux_binprm_arg = 26;
 	KprobeNetDev net_dev_arg = 27;
+	BpfCmd bpf_cmd_arg = 28;
+	SyscallId syscall_id = 29;
     }
     string label = 18;
 }
@@ -464,8 +471,10 @@ enum KprobeAction {
 	KPROBE_ACTION_TRACKSOCK   = 11;
     // UntrackSock action un-tracks socket.
 	KPROBE_ACTION_UNTRACKSOCK = 12;
-    // NotifyEnforcer action notifies killer sensor.
+    // NotifyEnforcer action notifies enforcer sensor.
 	KPROBE_ACTION_NOTIFYENFORCER = 13;
+    // CleanupEnforcerNotification action cleanups any state left by NotifyEnforcer
+	KPROBE_ACTION_CLEANUPENFORCERNOTIFICATION = 14;
 }
 
 message ProcessKprobe {
@@ -530,6 +539,25 @@ message ProcessUprobe {
     repeated KprobeArgument args = 7;
     // Tags of the Tracing Policy to categorize the event.
     repeated string tags = 8;
+}
+
+message ProcessLsm {
+    Process process = 1;
+    Process parent = 2;
+    // LSM hook name.
+    string function_name = 3;
+    // Name of the policy that created that LSM hook.
+    string policy_name = 5;
+    // Short message of the Tracing Policy to inform users what is going on.
+    string message = 6;
+    // Arguments definition of the observed LSM hook.
+    repeated KprobeArgument args = 7;
+    // Action performed when the LSM hook matched.
+    KprobeAction action = 8;
+    // Tags of the Tracing Policy to categorize the event.
+    repeated string tags = 9;
+    // IMA file hash. Format algorithm:value.
+    string ima_hash = 11;
 }
 
 message KernelModule {
@@ -624,6 +652,10 @@ message RuntimeHookResponse {}
 // This is intented to be used by OCI hooks (but not limited to them) and corresponds to the
 // CreateContainer hook:
 // https://github.com/opencontainers/runtime-spec/blob/main/config.md#createcontainer-hooks.
+//
+// The containerName, containerID, podName, podUID, and podNamespace fields are retrieved from the
+// annotations as a convenience, and may be left empty if the corresponding annotations are not
+// found.
 message CreateContainer {
     // cgroupsPath is the cgroups path for the container. The path is expected to be relative to the
     // cgroups mountpoint. See: https://github.com/opencontainers/runtime-spec/blob/58ec43f9fc39e0db229b653ae98295bfde74aeab/specs-go/config.go#L174
@@ -636,6 +668,14 @@ message CreateContainer {
     map<string, string> annotations = 3;
     // containerName is the name of the container
     string containerName = 4;
+    // containerID is the id of the container
+    string containerID = 5;
+    // podName is the pod name
+    string podName = 6;
+    // podUID is the pod uid
+    string podUID = 7;
+    // podNamespace is the namespace of the pod
+    string podNamespace = 8;
 }
 
 message StackTraceEntry {

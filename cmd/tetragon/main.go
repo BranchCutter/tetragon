@@ -48,9 +48,9 @@ import (
 	"github.com/cilium/tetragon/pkg/reader/proc"
 	"github.com/cilium/tetragon/pkg/rthooks"
 	"github.com/cilium/tetragon/pkg/sensors/base"
+	"github.com/cilium/tetragon/pkg/sensors/exec/procevents"
 	"github.com/cilium/tetragon/pkg/sensors/program"
 	"github.com/cilium/tetragon/pkg/server"
-	"github.com/cilium/tetragon/pkg/tgsyscall"
 	"github.com/cilium/tetragon/pkg/tracingpolicy"
 	"github.com/cilium/tetragon/pkg/unixlisten"
 	"github.com/cilium/tetragon/pkg/version"
@@ -133,6 +133,7 @@ func saveInitInfo() error {
 		ServerAddr:  option.Config.ServerAddress,
 		GopsAddr:    option.Config.GopsAddr,
 		MapDir:      bpf.MapPrefixPath(),
+		PID:         os.Getpid(),
 	}
 	return bugtool.SaveInitInfo(&info)
 }
@@ -157,13 +158,57 @@ func stopProfile() {
 	}
 }
 
+func getOldBpfDir(path string) (string, error) {
+	// sysfs directory will be removed, so we don't care
+	if option.Config.ReleasePinned {
+		return "", nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "", nil
+	}
+	old := path + "_old"
+	// remove the 'xxx_old' leftover if neded
+	if _, err := os.Stat(old); err == nil {
+		os.RemoveAll(old)
+		log.Info("Found bpf leftover instance, removing: %s", old)
+	}
+	if err := os.Rename(path, old); err != nil {
+		return "", err
+	}
+	log.Infof("Found bpf instance: %s, moved to: %s", path, old)
+	return old, nil
+}
+
+func deleteOldBpfDir(path string) {
+	if path == "" {
+		return
+	}
+	if err := os.RemoveAll(path); err != nil {
+		log.Errorf("Failed to remove old bpf instance '%s': %s\n", path, err)
+		return
+	}
+	log.Infof("Removed bpf instance: %s", path)
+}
+
+func loadInitialSensor(ctx context.Context) error {
+	mgr := observer.GetSensorManager()
+	initialSensor := base.GetInitialSensor()
+
+	if err := mgr.AddSensor(ctx, initialSensor.Name, initialSensor); err != nil {
+		return err
+	}
+	return mgr.EnableSensor(ctx, initialSensor.Name)
+}
+
 func tetragonExecute() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	return tetragonExecuteCtx(ctx, cancel, func() {})
+}
 
+func tetragonExecuteCtx(ctx context.Context, cancel context.CancelFunc, ready func()) error {
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, tgsyscall.SIGRTMIN_20,
-		tgsyscall.SIGRTMIN_21, tgsyscall.SIGRTMIN_22)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
 	// Logging should always be bootstrapped first. Do not add any code above this!
 	if err := logger.SetupLogging(option.Config.LogOpts, option.Config.Debug); err != nil {
@@ -194,21 +239,22 @@ func tetragonExecute() error {
 	proc.LogCurrentSecurityContext()
 
 	// When an instance terminates or restarts it may cleanup bpf programs,
-	// having a check here to see if another instance is already running, can
-	// help debug errors.
+	// having a check here to see if another instance is already running.
 	pid, err := pidfile.Create()
 	if err != nil {
-		// Log error but do not fail
-		log.WithError(err).WithField("pid", pid).Warn("Tetragon pid file creation failed")
-	} else {
-		log.WithFields(logrus.Fields{
-			"pid":     pid,
-			"pidfile": defaults.DefaultPidFile,
-		}).Info("Tetragon pid file creation succeeded")
+		// pidfile.Create returns error if creation of pid file failed with error
+		// other than pidfile.ErrPidFileAccess and pidfile.ErrPidIsNotAlive.
+		// In most cases this will mean that another instance of Tetragon is up
+		// and running and may interfere on eBPF programs and/or maps and lead
+		// to unpredictable behavior.
+		return fmt.Errorf("failed to create pid file '%s', another Tetragon instance seems to be up and running: %w", defaults.DefaultPidFile, err)
 	}
 	defer pidfile.Delete()
 
-	log.Info("BPF detected features: ", bpf.LogFeatures())
+	log.WithFields(logrus.Fields{
+		"pid":     pid,
+		"pidfile": defaults.DefaultPidFile,
+	}).Info("Tetragon pid file creation succeeded")
 
 	if option.Config.ForceLargeProgs && option.Config.ForceSmallProgs {
 		log.Fatalf("Can't specify --force-small-progs and --force-large-progs together")
@@ -220,6 +266,16 @@ func tetragonExecute() error {
 
 	if option.Config.ForceSmallProgs {
 		log.Info("Force loading smallprograms")
+	}
+
+	if option.Config.KeepSensorsOnExit {
+		// The effect of having both --release-pinned-bpf and --keep-sensors-on-exit options
+		// enabled is that the previous sysfs instance will be removed early before the new
+		// config is set. Not a big problem, but better to warn..
+		if option.Config.ReleasePinned {
+			log.Warn("Options --release-pinned-bpf and --keep-sensors-on-exit enabled together, we will remove sysfs instance early.")
+		}
+		log.Info("Not unloading sensors on exit")
 	}
 
 	if viper.IsSet(option.KeyNetnsDir) {
@@ -244,6 +300,19 @@ func tetragonExecute() error {
 	bpf.CheckOrMountFS("")
 	bpf.CheckOrMountDebugFS()
 	bpf.CheckOrMountCgroup2()
+	bpf.SetMapPrefix(option.Config.BpfDir)
+
+	// We try to detect previous instance, which might be there for legitimate reasons
+	// (--keep-sensors-on-exit) and rename to 'tetragon_old'.
+	// Then we do the 'best' effort to keep running sensors as long as possible and remove
+	// 'tetragon_old' directory when tetragon is started and its policy is loaded.
+	// If there's --release-pinned-bpf option enabled, we need to remove previous sysfs
+	// instance right away (see check for option.Config.ReleasePinned below), so we don't
+	// bother renaming in that case.
+	oldBpfDir, err := getOldBpfDir(bpf.MapPrefixPath())
+	if err != nil {
+		return fmt.Errorf("Failed to move old tetragon base directory: %w", err)
+	}
 
 	if option.Config.PprofAddr != "" {
 		go func() {
@@ -296,60 +365,24 @@ func tetragonExecute() error {
 		obs.PrintStats()
 	}()
 
-	defaultLevel := logger.GetLogLevel()
 	go func() {
-		for {
-			s := <-sigs
-			switch s {
-			case syscall.SIGINT, syscall.SIGTERM:
-				// if we receive a signal, call cancel so that contexts are finalized, which will
-				// leads to normally return from tetragonExecute().
-				log.Infof("Received signal %s, shutting down...", s)
-				cancel()
-				return
-			case tgsyscall.SIGRTMIN_20: // SIGRTMIN+20
-				currentLevel := logger.GetLogLevel()
-				if currentLevel == logrus.DebugLevel {
-					log.Infof("Received signal SIGRTMIN+20: LogLevel is already '%s'", currentLevel)
-				} else {
-					logger.SetLogLevel(logrus.DebugLevel)
-					log.Infof("Received signal SIGRTMIN+20: switching from LogLevel '%s' to '%s'", currentLevel, logger.GetLogLevel())
-				}
-			case tgsyscall.SIGRTMIN_21: // SIGRTMIN+21
-				currentLevel := logger.GetLogLevel()
-				if currentLevel == logrus.TraceLevel {
-					log.Infof("Received signal SIGRTMIN+21: LogLevel is already '%s'", currentLevel)
-				} else {
-					logger.SetLogLevel(logrus.TraceLevel)
-					log.Infof("Received signal SIGRTMIN+21: switching from LogLevel '%s' to '%s'", currentLevel, logger.GetLogLevel())
-				}
-			case tgsyscall.SIGRTMIN_22: // SIGRTMIN+22
-				logger.SetLogLevel(defaultLevel)
-				log.Infof("Received signal SIGRTMIN+22: resetting original LogLevel '%s'", logger.GetLogLevel())
-			}
-		}
+		s := <-sigs
+		// if we receive a signal, call cancel so that contexts are finalized, which will
+		// leads to normally return from tetragonExecute().
+		log.Infof("Received signal %s, shutting down...", s)
+		cancel()
 	}()
 
-	// start sensor manager, and have it wait on sensorMgWait until we load
-	// the base sensor. note that this means that calling methods on the
-	// manager will block so they will have to either be executed in a
-	// goroutine or after we close the sensorMgWait channel to avoid
-	// deadlock.
-	sensorMgWait := make(chan struct{})
-	defer func() {
-		// if we fail before closing the channel, close it so that
-		// the sensor manager routine is unblocked.
-		if sensorMgWait != nil {
-			close(sensorMgWait)
-		}
-	}()
-	if err := obs.InitSensorManager(sensorMgWait); err != nil {
+	if err := obs.InitSensorManager(); err != nil {
 		return err
 	}
 
 	if err := btf.InitCachedBTF(option.Config.HubbleLib, option.Config.BTF); err != nil {
 		return err
 	}
+
+	// needs BTF, so caling it after InitCachedBTF
+	log.Info("BPF detected features: ", bpf.LogFeatures())
 
 	if err := observer.InitDataCache(option.Config.DataCacheSize); err != nil {
 		return err
@@ -379,14 +412,22 @@ func tetragonExecute() error {
 		}
 
 		k8sClient := kubernetes.NewForConfigOrDie(config)
-		k8sWatcher = watcher.NewK8sWatcher(k8sClient, 60*time.Second)
+		k8sWatcher, err = watcher.NewK8sWatcher(k8sClient, 60*time.Second)
+		if err != nil {
+			return err
+		}
 	} else {
 		log.Info("Disabling Kubernetes API")
 		k8sWatcher = watcher.NewFakeK8sWatcher(nil)
 	}
 	k8sWatcher.Start()
 
-	if err := process.InitCache(k8sWatcher, option.Config.ProcessCacheSize); err != nil {
+	pcGCInterval := option.Config.ProcessCacheGCInterval
+	if pcGCInterval <= 0 {
+		pcGCInterval = defaults.DefaultProcessCacheGCInterval
+	}
+
+	if err := process.InitCache(k8sWatcher, option.Config.ProcessCacheSize, pcGCInterval); err != nil {
 		return err
 	}
 
@@ -411,6 +452,16 @@ func tetragonExecute() error {
 	if err != nil {
 		return err
 	}
+
+	// Load initial sensor before we start the server,
+	// so it's there before we allow to load policies.
+	if err = loadInitialSensor(ctx); err != nil {
+		return err
+	}
+	observer.GetSensorManager().LogSensorsAndProbes(ctx)
+	defer func() {
+		observer.RemoveSensors(ctx)
+	}()
 
 	pm, err := tetragonGrpc.NewProcessManager(
 		ctx,
@@ -442,27 +493,14 @@ func tetragonExecute() error {
 
 	obs.LogPinnedBpf(observerDir)
 
-	base.ConfigCgroupRate(&option.Config.CgroupRate)
-
-	// load base sensor
-	initialSensor := base.GetInitialSensor()
-	if err := initialSensor.Load(observerDir); err != nil {
+	if err = procevents.GetRunningProcs(); err != nil {
 		return err
 	}
-	defer func() {
-		initialSensor.Unload()
-	}()
 
-	cgrouprate.NewCgroupRate(ctx, pm, base.CgroupRateMap, &option.Config.CgroupRate)
-	cgrouprate.Config(base.CgroupRateOptionsMap)
-
-	// now that the base sensor was loaded, we can start the sensor manager
-	close(sensorMgWait)
-	sensorMgWait = nil
-	observer.GetSensorManager().LogSensorsAndProbes(ctx)
-	defer func() {
-		observer.RemoveSensors(ctx)
-	}()
+	if err := cgrouprate.NewCgroupRate(ctx, pm, &option.Config.CgroupRate); err != nil {
+		return err
+	}
+	cgrouprate.Config()
 
 	err = loadTpFromDir(ctx, option.Config.TracingPolicyDir)
 	if err != nil {
@@ -477,12 +515,14 @@ func tetragonExecute() error {
 		}
 	}
 
+	deleteOldBpfDir(oldBpfDir)
+
 	// k8s should have metrics, so periodically log only in a non k8s
 	if !option.Config.EnableK8s {
 		go logStatus(ctx, obs)
 	}
 
-	return obs.Start(ctx)
+	return obs.StartReady(ctx, ready)
 }
 
 func waitCRDs(config *rest.Config) error {
@@ -734,6 +774,10 @@ func startExporter(ctx context.Context, server *server.Server) error {
 }
 
 func Serve(ctx context.Context, listenAddr string, srv *server.Server) error {
+	// we use an empty listen address to effectively disable the gRPC server
+	if len(listenAddr) == 0 {
+		return nil
+	}
 	grpcServer := grpc.NewServer()
 	tetragon.RegisterFineGuidanceSensorsServer(grpcServer, srv)
 	proto, addr, err := server.SplitListenAddr(listenAddr)

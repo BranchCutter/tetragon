@@ -4,6 +4,10 @@
 package policyfiltermetrics
 
 import (
+	"maps"
+	"slices"
+
+	"github.com/cilium/tetragon/pkg/metrics"
 	"github.com/cilium/tetragon/pkg/metrics/consts"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -63,15 +67,29 @@ func (s OperationErr) String() string {
 }
 
 var (
-	PolicyFilterOpMetrics = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace:   consts.MetricsNamespace,
-		Name:        "policyfilter_metrics_total",
-		Help:        "Policy filter metrics. For internal use only.",
-		ConstLabels: nil,
-	}, []string{"subsys", "op", "error"})
+	subsysLabel = metrics.ConstrainedLabel{
+		Name:   "subsys",
+		Values: slices.Collect(maps.Values(subsysLabelValues)),
+	}
+
+	operationLabel = metrics.ConstrainedLabel{
+		Name:   "operation",
+		Values: slices.Collect(maps.Values(operationLabelValues)),
+	}
+
+	errorLabel = metrics.ConstrainedLabel{
+		Name:   "error",
+		Values: slices.Collect(maps.Values(operationErrLabels)),
+	}
 )
 
 var (
+	PolicyFilterOpMetrics = metrics.MustNewCounter(metrics.NewOpts(
+		consts.MetricsNamespace, "", "policyfilter_operations_total",
+		"Number of policy filter operations.",
+		nil, []metrics.ConstrainedLabel{subsysLabel, operationLabel, errorLabel}, nil,
+	), nil)
+
 	PolicyFilterHookContainerNameMissingMetrics = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace:   consts.MetricsNamespace,
 		Name:        "policyfilter_hook_container_name_missing_total",
@@ -80,23 +98,8 @@ var (
 	})
 )
 
-func InitMetrics(registry *prometheus.Registry) {
-	registry.MustRegister(PolicyFilterOpMetrics, PolicyFilterHookContainerNameMissingMetrics)
-
-	// Initialize metrics with labels
-	for _, subsys := range subsysLabelValues {
-		for _, op := range operationLabelValues {
-			for _, err := range operationErrLabels {
-				PolicyFilterOpMetrics.WithLabelValues(
-					subsys, op, err,
-				).Add(0)
-			}
-		}
-	}
-
-	// NOTES:
-	// * Don't confuse op in policyfilter_metrics_total with ops.OpCode
-	// * Rename policyfilter_metrics_total to get rid of _metrics?
+func RegisterMetrics(group metrics.Group) {
+	group.MustRegister(PolicyFilterOpMetrics, PolicyFilterHookContainerNameMissingMetrics)
 }
 
 func OpInc(subsys Subsys, op Operation, err string) {

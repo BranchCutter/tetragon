@@ -12,19 +12,20 @@ const (
 )
 
 const (
-	ActionPost         = 0
-	ActionFollowFd     = 1
-	ActionSigKill      = 2
-	ActionUnfollowFd   = 3
-	ActionOverride     = 4
-	ActionCopyFd       = 5
-	ActionGetUrl       = 6
-	ActionLookupDns    = 7
-	ActionNoPost       = 8
-	ActionSignal       = 9
-	ActionTrackSock    = 10
-	ActionUntrackSock  = 11
-	ActionNotifyKiller = 12
+	ActionPost                        = 0
+	ActionFollowFd                    = 1
+	ActionSigKill                     = 2
+	ActionUnfollowFd                  = 3
+	ActionOverride                    = 4
+	ActionCopyFd                      = 5
+	ActionGetUrl                      = 6
+	ActionLookupDns                   = 7
+	ActionNoPost                      = 8
+	ActionSignal                      = 9
+	ActionTrackSock                   = 10
+	ActionUntrackSock                 = 11
+	ActionNotifyEnforcer              = 12
+	ActionCleanupEnforcerNotification = 13
 )
 
 const (
@@ -120,9 +121,10 @@ func (m MsgGenericKprobeArgBytes) IsReturnArg() bool {
 }
 
 type MsgGenericKprobeArgInt struct {
-	Index uint64
-	Value int32
-	Label string
+	Index         uint64
+	Value         int32
+	UserSpaceType int32
+	Label         string
 }
 
 func (m MsgGenericKprobeArgInt) GetIndex() uint64 {
@@ -243,6 +245,11 @@ type MsgGenericKprobeArgSkb struct {
 	SecPathLen  uint32
 	SecPathOLen uint32
 	Label       string
+}
+
+type MsgGenericSyscallID struct {
+	ID  uint32
+	ABI string
 }
 
 func (m MsgGenericKprobeArgSkb) GetIndex() uint64 {

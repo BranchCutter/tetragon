@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cilium/tetragon/pkg/cgrouprate"
+	"github.com/cilium/tetragon/pkg/defaults"
 	"github.com/cilium/tetragon/pkg/encoder"
 	"github.com/cilium/tetragon/pkg/metricsconfig"
 	"github.com/cilium/tetragon/pkg/observer"
@@ -40,6 +41,7 @@ import (
 	"github.com/cilium/tetragon/pkg/rthooks"
 	"github.com/cilium/tetragon/pkg/sensors"
 	"github.com/cilium/tetragon/pkg/sensors/base"
+	"github.com/cilium/tetragon/pkg/sensors/exec/procevents"
 	"github.com/cilium/tetragon/pkg/testutils"
 	"github.com/cilium/tetragon/pkg/watcher"
 	"github.com/cilium/tetragon/pkg/watcher/crd"
@@ -56,9 +58,10 @@ var (
 )
 
 type testObserverOptions struct {
-	crd    bool
-	config string
-	lib    string
+	crd                 bool
+	config              string
+	lib                 string
+	procCacheGCInterval time.Duration
 }
 
 type testExporterOptions struct {
@@ -98,6 +101,12 @@ func WithDenyList(denyList *tetragon.Filter) TestOption {
 func WithConfig(config string) TestOption {
 	return func(o *TestOptions) {
 		o.observer.config = config
+	}
+}
+
+func WithProcCacheGCInterval(GCInterval time.Duration) TestOption {
+	return func(o *TestOptions) {
+		o.observer.procCacheGCInterval = GCInterval
 	}
 }
 
@@ -224,7 +233,7 @@ func getDefaultObserver(tb testing.TB, ctx context.Context, initialSensor *senso
 		return nil, err
 	}
 
-	cgrouprate.Config(base.CgroupRateOptionsMap)
+	cgrouprate.Config()
 
 	exportFname, err := testutils.GetExportFilename(tb)
 	if err != nil {
@@ -284,10 +293,22 @@ func GetDefaultObserverWithFile(tb testing.TB, ctx context.Context, file, lib st
 	return GetDefaultObserverWithWatchers(tb, ctx, b, opts...)
 }
 
+func GetDefaultSensorsWithBase(tb testing.TB, b *sensors.Sensor, file, lib string, opts ...TestOption) ([]*sensors.Sensor, error) {
+	opts = append(opts, WithConfig(file))
+	opts = append(opts, WithLib(lib))
+
+	return getDefaultSensors(tb, b, opts...)
+}
+
 func GetDefaultSensorsWithFile(tb testing.TB, file, lib string, opts ...TestOption) ([]*sensors.Sensor, error) {
 	opts = append(opts, WithConfig(file))
 	opts = append(opts, WithLib(lib))
 
+	b := base.GetInitialSensor()
+	return getDefaultSensors(tb, b, opts...)
+}
+
+func getDefaultSensors(tb testing.TB, initialSensor *sensors.Sensor, opts ...TestOption) ([]*sensors.Sensor, error) {
 	option.Config.BpfDir = bpf.MapPrefixPath()
 
 	testutils.CaptureLog(tb, logger.GetLogger().(*logrus.Logger))
@@ -327,13 +348,11 @@ func GetDefaultSensorsWithFile(tb testing.TB, file, lib string, opts ...TestOpti
 		}
 	}
 
-	base := base.GetInitialSensor()
-
-	if err = loadSensors(tb, base, sens); err != nil {
+	if err = loadSensors(tb, initialSensor, sens); err != nil {
 		return nil, err
 	}
 
-	sens = append(sens, base)
+	sens = append(sens, initialSensor)
 	ret := make([]*sensors.Sensor, 0, len(sens))
 	for _, si := range sens {
 		if s, ok := si.(*sensors.Sensor); ok {
@@ -347,8 +366,9 @@ func loadExporter(tb testing.TB, ctx context.Context, obs *observer.Observer, op
 	watcher := opts.watcher
 	processCacheSize := 32768
 	dataCacheSize := 1024
+	procCacheGCInterval := defaults.DefaultProcessCacheGCInterval
 
-	if err := obs.InitSensorManager(nil); err != nil {
+	if err := obs.InitSensorManager(); err != nil {
 		return err
 	}
 
@@ -356,7 +376,6 @@ func loadExporter(tb testing.TB, ctx context.Context, obs *observer.Observer, op
 	// this up and remove/hide the global variable.
 	sensorManager := observer.GetSensorManager()
 	tb.Cleanup(func() {
-		sensorManager.StopSensorManager(ctx)
 		observer.ResetSensorManager()
 	})
 
@@ -368,7 +387,11 @@ func loadExporter(tb testing.TB, ctx context.Context, obs *observer.Observer, op
 		return err
 	}
 
-	if err := process.InitCache(watcher, processCacheSize); err != nil {
+	if oo.procCacheGCInterval > 0 {
+		procCacheGCInterval = oo.procCacheGCInterval
+	}
+
+	if err := process.InitCache(watcher, processCacheSize, procCacheGCInterval); err != nil {
 		return err
 	}
 
@@ -413,8 +436,7 @@ func loadExporter(tb testing.TB, ctx context.Context, obs *observer.Observer, op
 		obs.RemoveListener(processManager)
 	})
 
-	cgrouprate.NewCgroupRate(ctx, processManager, base.CgroupRateMap, &option.Config.CgroupRate)
-	return nil
+	return cgrouprate.NewCgroupRate(ctx, processManager, &option.Config.CgroupRate)
 }
 
 func loadObserver(tb testing.TB, ctx context.Context, base *sensors.Sensor,
@@ -422,6 +444,13 @@ func loadObserver(tb testing.TB, ctx context.Context, base *sensors.Sensor,
 
 	if err := base.Load(option.Config.BpfDir); err != nil {
 		tb.Fatalf("Load base error: %s\n", err)
+	}
+	tb.Cleanup(func() {
+		base.Unload(true)
+	})
+
+	if err := procevents.GetRunningProcs(); err != nil {
+		return err
 	}
 
 	if tp != nil {
@@ -432,7 +461,6 @@ func loadObserver(tb testing.TB, ctx context.Context, base *sensors.Sensor,
 
 	tb.Cleanup(func() {
 		observer.RemoveSensors(ctx)
-		base.Unload()
 	})
 	return nil
 }
@@ -440,6 +468,10 @@ func loadObserver(tb testing.TB, ctx context.Context, base *sensors.Sensor,
 func loadSensors(tb testing.TB, base sensors.SensorIface, sens []sensors.SensorIface) error {
 	if err := base.Load(option.Config.BpfDir); err != nil {
 		tb.Fatalf("Load base error: %s\n", err)
+	}
+
+	if err := procevents.GetRunningProcs(); err != nil {
+		tb.Fatalf("procevents.GetRunningProcs: %s", err)
 	}
 
 	for _, s := range sens {
@@ -504,6 +536,10 @@ func DockerRun(tb testing.TB, args ...string) (containerId string) {
 
 type fakeK8sWatcher struct {
 	fakePod, fakeNamespace string
+}
+
+func (f *fakeK8sWatcher) FindMirrorPod(_ string) (*corev1.Pod, error) {
+	return nil, fmt.Errorf("fakeK8sWatcher does not support Mirror pods")
 }
 
 func (f *fakeK8sWatcher) FindPod(podID string) (*corev1.Pod, error) {
@@ -603,7 +639,7 @@ func WriteConfigFile(fileName, config string) error {
 }
 
 func GetDefaultObserver(tb testing.TB, ctx context.Context, lib string, opts ...TestOption) (*observer.Observer, error) {
-	b := base.GetInitialSensorTest()
+	b := base.GetInitialSensorTest(tb)
 
 	opts = append(opts, WithLib(lib))
 

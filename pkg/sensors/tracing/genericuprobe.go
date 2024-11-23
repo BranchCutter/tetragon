@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"sync/atomic"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/tetragon/pkg/api/ops"
@@ -23,11 +22,9 @@ import (
 	"github.com/cilium/tetragon/pkg/logger"
 	"github.com/cilium/tetragon/pkg/observer"
 	"github.com/cilium/tetragon/pkg/option"
-	"github.com/cilium/tetragon/pkg/policyfilter"
 	"github.com/cilium/tetragon/pkg/selectors"
 	"github.com/cilium/tetragon/pkg/sensors"
 	"github.com/cilium/tetragon/pkg/sensors/program"
-	"github.com/cilium/tetragon/pkg/tracingpolicy"
 )
 
 type observerUprobeSensor struct {
@@ -64,7 +61,6 @@ func init() {
 		name: "uprobe sensor",
 	}
 	sensors.RegisterProbeType("generic_uprobe", uprobe)
-	sensors.RegisterPolicyHandlerAtInit(uprobe.name, uprobe)
 	observer.RegisterEventHandlerAtInit(ops.MSG_OP_GENERIC_UPROBE, handleGenericUprobe)
 }
 
@@ -129,14 +125,14 @@ func loadSingleUprobeSensor(uprobeEntry *genericUprobe, args sensors.LoadProbeAr
 		{
 			Index: 0,
 			Name:  "config_map",
-			Load: func(m *ebpf.Map, index uint32) error {
+			Load: func(m *ebpf.Map, _ string, index uint32) error {
 				return m.Update(index, configData.Bytes()[:], ebpf.UpdateAny)
 			},
 		},
 		{
 			Index: 0,
 			Name:  "filter_map",
-			Load: func(m *ebpf.Map, index uint32) error {
+			Load: func(m *ebpf.Map, _ string, index uint32) error {
 				return m.Update(index, selBuff[:], ebpf.UpdateAny)
 			},
 		},
@@ -175,14 +171,14 @@ func loadMultiUprobeSensor(ids []idtable.EntryID, args sensors.LoadProbeArgs) er
 			{
 				Index: uint32(index),
 				Name:  "config_map",
-				Load: func(m *ebpf.Map, index uint32) error {
+				Load: func(m *ebpf.Map, _ string, index uint32) error {
 					return m.Update(index, configData.Bytes()[:], ebpf.UpdateAny)
 				},
 			},
 			{
 				Index: uint32(index),
 				Name:  "filter_map",
-				Load: func(m *ebpf.Map, index uint32) error {
+				Load: func(m *ebpf.Map, _ string, index uint32) error {
 					return m.Update(index, selBuff[:], ebpf.UpdateAny)
 				},
 			},
@@ -246,9 +242,10 @@ type addUprobeIn struct {
 }
 
 func createGenericUprobeSensor(
-	name string,
 	spec *v1alpha1.TracingPolicySpec,
+	name string,
 	policyName string,
+	namespace string,
 ) (*sensors.Sensor, error) {
 	var progs []*program.Program
 	var maps []*program.Map
@@ -278,7 +275,7 @@ func createGenericUprobeSensor(
 	}
 
 	if in.useMulti {
-		progs, maps, err = createMultiUprobeSensor(name, ids)
+		progs, maps, err = createMultiUprobeSensor(name, ids, policyName)
 	} else {
 		progs, maps, err = createSingleUprobeSensor(ids)
 	}
@@ -288,9 +285,11 @@ func createGenericUprobeSensor(
 	}
 
 	return &sensors.Sensor{
-		Name:  name,
-		Progs: progs,
-		Maps:  maps,
+		Name:      name,
+		Progs:     progs,
+		Maps:      maps,
+		Policy:    policyName,
+		Namespace: namespace,
 	}, nil
 }
 
@@ -397,7 +396,7 @@ func multiUprobePinPath(sensorPath string) string {
 	return sensors.PathJoin(sensorPath, "multi_kprobe")
 }
 
-func createMultiUprobeSensor(sensorPath string, multiIDs []idtable.EntryID) ([]*program.Program, []*program.Map, error) {
+func createMultiUprobeSensor(sensorPath string, multiIDs []idtable.EntryID, policyName string) ([]*program.Program, []*program.Map, error) {
 	var progs []*program.Program
 	var maps []*program.Map
 
@@ -407,17 +406,18 @@ func createMultiUprobeSensor(sensorPath string, multiIDs []idtable.EntryID) ([]*
 
 	load := program.Builder(
 		path.Join(option.Config.HubbleLib, loadProgName),
-		fmt.Sprintf("%d functions", len(multiIDs)),
+		fmt.Sprintf("uprobe_multi (%d functions)", len(multiIDs)),
 		"uprobe.multi/generic_uprobe",
 		pinPath,
 		"generic_uprobe").
-		SetLoaderData(multiIDs)
+		SetLoaderData(multiIDs).
+		SetPolicy(policyName)
 
 	progs = append(progs, load)
 
-	configMap := program.MapBuilderPin("config_map", sensors.PathJoin(pinPath, "config_map"), load)
-	tailCalls := program.MapBuilderPin("uprobe_calls", sensors.PathJoin(pinPath, "up_calls"), load)
-	filterMap := program.MapBuilderPin("filter_map", sensors.PathJoin(pinPath, "filter_map"), load)
+	configMap := program.MapBuilderProgram("config_map", load)
+	tailCalls := program.MapBuilderProgram("uprobe_calls", load)
+	filterMap := program.MapBuilderProgram("filter_map", load)
 
 	maps = append(maps, configMap, tailCalls, filterMap)
 
@@ -451,9 +451,6 @@ func createUprobeSensorFromEntry(uprobeEntry *genericUprobe,
 		loadProgName = "bpf_generic_uprobe_v53.o"
 	}
 
-	pinPath := uprobeEntry.pinPathPrefix
-	pinProg := sensors.PathJoin(pinPath, "prog")
-
 	attachData := &program.UprobeAttachData{
 		Path:   uprobeEntry.path,
 		Symbol: uprobeEntry.symbol,
@@ -461,38 +458,20 @@ func createUprobeSensorFromEntry(uprobeEntry *genericUprobe,
 
 	load := program.Builder(
 		path.Join(option.Config.HubbleLib, loadProgName),
-		"",
+		fmt.Sprintf("%s %s", uprobeEntry.path, uprobeEntry.symbol),
 		"uprobe/generic_uprobe",
-		pinProg,
+		fmt.Sprintf("%d-%s", uprobeEntry.tableId.ID, uprobeEntry.symbol),
 		"generic_uprobe").
 		SetAttachData(attachData).
-		SetLoaderData(uprobeEntry)
+		SetLoaderData(uprobeEntry).
+		SetPolicy(uprobeEntry.policyName)
 
 	progs = append(progs, load)
 
-	configMap := program.MapBuilderPin("config_map", sensors.PathJoin(pinPath, "config_map"), load)
-	tailCalls := program.MapBuilderPin("uprobe_calls", sensors.PathJoin(pinPath, "up_calls"), load)
-	filterMap := program.MapBuilderPin("filter_map", sensors.PathJoin(pinPath, "filter_map"), load)
-	selMatchBinariesMap := program.MapBuilderPin("tg_mb_sel_opts", sensors.PathJoin(pinPath, "tg_mb_sel_opts"), load)
+	configMap := program.MapBuilderProgram("config_map", load)
+	tailCalls := program.MapBuilderProgram("uprobe_calls", load)
+	filterMap := program.MapBuilderProgram("filter_map", load)
+	selMatchBinariesMap := program.MapBuilderProgram("tg_mb_sel_opts", load)
 	maps = append(maps, configMap, tailCalls, filterMap, selMatchBinariesMap)
 	return progs, maps
-}
-
-func (k *observerUprobeSensor) PolicyHandler(
-	p tracingpolicy.TracingPolicy,
-	fid policyfilter.PolicyID,
-) (sensors.SensorIface, error) {
-	spec := p.TpSpec()
-
-	if len(spec.UProbes) == 0 {
-		return nil, nil
-	}
-
-	if fid != policyfilter.NoFilterID {
-		return nil, fmt.Errorf("uprobe sensor does not implement policy filtering")
-	}
-
-	name := fmt.Sprintf("gup-sensor-%d", atomic.AddUint64(&sensorCounter, 1))
-	policyName := p.TpName()
-	return createGenericUprobeSensor(name, spec, policyName)
 }

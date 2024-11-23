@@ -13,6 +13,7 @@ import (
 	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/tetragon/pkg/arch"
 	"github.com/cilium/tetragon/pkg/k8s/apis/cilium.io/v1alpha1"
+	"github.com/cilium/tetragon/pkg/ksyms"
 	"github.com/cilium/tetragon/pkg/logger"
 	"github.com/cilium/tetragon/pkg/syscallinfo"
 )
@@ -46,8 +47,24 @@ func (e *ValidationFailed) Error() string {
 func ValidateKprobeSpec(bspec *btf.Spec, call string, kspec *v1alpha1.KProbeSpec) error {
 	var fn *btf.Func
 
+	// get kernel symbols
+	ks, err := ksyms.KernelSymbols()
+	if err != nil {
+		return fmt.Errorf("validateKprobeSpec: ksyms.KernelSymbols: %w", err)
+	}
+
+	// check if this functio name is part of a kernel module
+	if kmod, err := ks.GetKmod(call); err == nil {
+		// get the spec from the kernel module and continue the validation with that
+		kmodSpec, err := btf.LoadKernelModuleSpec(kmod)
+		if err != nil {
+			return fmt.Errorf("validateKprobeSpec: btf.LoadKernelModuleSpec: %w", err)
+		}
+		bspec = kmodSpec
+	}
+
 	origCall := call
-	err := bspec.TypeByName(call, &fn)
+	err = bspec.TypeByName(call, &fn)
 	if err != nil && kspec.Syscall {
 		// Try with system call prefix
 		call, err = arch.AddSyscallPrefix(call)
@@ -318,7 +335,7 @@ func typesCompatible(specTy string, kernelTy string) bool {
 		case "struct user_namespace *":
 			return true
 		}
-	case "capability":
+	case "capability", "bpf_cmd":
 		switch kernelTy {
 		case "int":
 			return true
@@ -417,7 +434,15 @@ func AvailableSyscalls() ([]string, error) {
 	}
 
 	ret := []string{}
-	for key, value := range syscallinfo.SyscallsNames() {
+	abi, err := syscallinfo.DefaultABI()
+	if err != nil {
+		return nil, err
+	}
+	names, err := syscallinfo.SyscallsNames(abi)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range names {
 		if value == "" {
 			return nil, fmt.Errorf("syscall name for %q is empty", key)
 		}
@@ -456,13 +481,16 @@ func GetSyscallsList() ([]string, error) {
 
 	var list []string
 
-	for key, value := range syscallinfo.SyscallsNames() {
+	abi, err := syscallinfo.DefaultABI()
+	if err != nil {
+		return nil, err
+	}
+	names, err := syscallinfo.SyscallsNames(abi)
+	if err != nil {
+		return nil, err
+	}
+	for _, value := range names {
 		var fn *btf.Func
-
-		if value == "" {
-			return nil, fmt.Errorf("syscall name for %q is empty", key)
-		}
-
 		sym, err := arch.AddSyscallPrefix(value)
 		if err != nil {
 			return []string{}, err

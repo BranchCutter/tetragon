@@ -7,6 +7,7 @@
 #include "bpf_event.h"
 #include "bpf_helpers.h"
 #include "bpf_cred.h"
+#include "../process/string_maps.h"
 
 /* Applying 'packed' attribute to structs causes clang to write to the
  * members byte-by-byte, as offsets may not be aligned. This is bad for
@@ -264,8 +265,6 @@ struct msg_ns {
 }; // All fields aligned so no 'packed' attribute.
 
 struct msg_k8s {
-	__u32 net_ns;
-	__u32 cid;
 	__u64 cgrpid;
 	char docker_id[DOCKER_ID_LENGTH];
 }; // All fields aligned so no 'packed' attribute.
@@ -273,12 +272,8 @@ struct msg_k8s {
 #define BINARY_PATH_MAX_LEN 256
 
 struct heap_exe {
-	// because of verifier limitations, this has to be 2 * 256 bytes while 256
-	// should be theoretically sufficient, and actually is, in unit tests.
-	char buf[BINARY_PATH_MAX_LEN * 2];
-	// offset points to the start of the path in the above buffer. Use offset to
-	// read the path in the buffer since it's written from the end.
-	char *off;
+	char buf[BINARY_PATH_MAX_LEN];
+	char end[STRING_POSTFIX_MAX_LENGTH];
 	__u32 len;
 	__u32 error;
 }; // All fields aligned so no 'packed' attribute.
@@ -305,6 +300,8 @@ struct msg_execve_event {
 #endif
 }; // All fields aligned so no 'packed' attribute.
 
+typedef __u64 mbset_t;
+
 // This structure stores the binary path that was recorded on execve.
 // Technically PATH_MAX is 4096 but we limit the length we store since we have
 // limits on the length of the string to compare:
@@ -314,10 +311,18 @@ struct msg_execve_event {
 struct binary {
 	// length of the path stored in path, this should be < BINARY_PATH_MAX_LEN
 	// but can contain negative value in case of copy error.
-	// While s16 would be sufficient, 64 bits are handy for alignment.
-	__s64 path_length;
+	// While s16 would be sufficient, 32 bits are handy for alignment.
+	__s32 path_length;
+	// if end_r contains reversed path postfix
+	__u32 reversed;
 	// BINARY_PATH_MAX_LEN first bytes of the path
 	char path[BINARY_PATH_MAX_LEN];
+	// STRING_POSTFIX_MAX_LENGTH last bytes of the path
+	char end[STRING_POSTFIX_MAX_LENGTH];
+	// STRING_POSTFIX_MAX_LENGTH reversed last bytes of the path
+	char end_r[STRING_POSTFIX_MAX_LENGTH];
+	// matchBinary bitset for binary
+	mbset_t mb_bitset;
 }; // All fields aligned so no 'packed' attribute
 
 // The execve_map_value is tracked by the TGID of the thread group
@@ -557,8 +562,16 @@ FUNC_INLINE struct execve_info *execve_joined_info_map_get(__u64 tid)
 _Static_assert(sizeof(struct execve_map_value) % 8 == 0,
 	       "struct execve_map_value should have size multiple of 8 bytes");
 
+#define SENT_FAILED_UNKNOWN 0 // unknown error
+#define SENT_FAILED_ENOENT  1 // ENOENT
+#define SENT_FAILED_E2BIG   2 // E2BIG
+#define SENT_FAILED_EBUSY   3 // EBUSY
+#define SENT_FAILED_EINVAL  4 // EINVAL
+#define SENT_FAILED_ENOSPC  5 // ENOSPC
+#define SENT_FAILED_MAX	    6
+
 struct kernel_stats {
-	__u64 sent_failed[256];
+	__u64 sent_failed[256][SENT_FAILED_MAX];
 };
 
 struct {
@@ -569,18 +582,43 @@ struct {
 } tg_stats_map SEC(".maps");
 
 FUNC_INLINE void
-perf_event_output_metric(void *ctx, u8 metric, void *map, u64 flags, void *data, u64 size)
+perf_event_output_update_error_metric(u8 msg_op, long err)
 {
 	struct kernel_stats *valp;
 	__u32 zero = 0;
+
+	valp = map_lookup_elem(&tg_stats_map, &zero);
+	if (valp) {
+		switch (err) {
+		case -2: // ENOENT
+			__sync_fetch_and_add(&valp->sent_failed[msg_op][SENT_FAILED_ENOENT], 1);
+			break;
+		case -7: // E2BIG
+			__sync_fetch_and_add(&valp->sent_failed[msg_op][SENT_FAILED_E2BIG], 1);
+			break;
+		case -16: // EBUSY
+			__sync_fetch_and_add(&valp->sent_failed[msg_op][SENT_FAILED_EBUSY], 1);
+			break;
+		case -22: // EINVAL
+			__sync_fetch_and_add(&valp->sent_failed[msg_op][SENT_FAILED_EINVAL], 1);
+			break;
+		case -28: // ENOSPC
+			__sync_fetch_and_add(&valp->sent_failed[msg_op][SENT_FAILED_ENOSPC], 1);
+			break;
+		default:
+			__sync_fetch_and_add(&valp->sent_failed[msg_op][SENT_FAILED_UNKNOWN], 1);
+		}
+	}
+}
+
+FUNC_INLINE void
+perf_event_output_metric(void *ctx, u8 msg_op, void *map, u64 flags, void *data, u64 size)
+{
 	long err;
 
 	err = perf_event_output(ctx, map, flags, data, size);
-	if (err < 0) {
-		valp = map_lookup_elem(&tg_stats_map, &zero);
-		if (valp)
-			__sync_fetch_and_add(&valp->sent_failed[metric], 1);
-	}
+	if (err < 0)
+		perf_event_output_update_error_metric(msg_op, err);
 }
 
 #endif //_PROCESS__

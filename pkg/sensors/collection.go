@@ -112,7 +112,7 @@ func (c *collection) load(bpfDir string) error {
 	if err != nil {
 		// NB: we could try to unload sensors going back from the one that failed, but since
 		// unload() checks s.IsLoaded, is easier to just to use unload().
-		if unloadErr := c.unload(); unloadErr != nil {
+		if unloadErr := c.unload(true); unloadErr != nil {
 			err = multierr.Append(err, fmt.Errorf("unloading after loading failure failed: %w", unloadErr))
 		}
 	}
@@ -121,13 +121,13 @@ func (c *collection) load(bpfDir string) error {
 }
 
 // unload will attempt to unload all the sensors in a collection
-func (c *collection) unload() error {
+func (c *collection) unload(unpin bool) error {
 	var err error
 	for _, s := range c.sensors {
 		if !s.IsLoaded() {
 			continue
 		}
-		unloadErr := s.Unload()
+		unloadErr := s.Unload(unpin)
 		err = multierr.Append(err, unloadErr)
 	}
 
@@ -138,46 +138,8 @@ func (c *collection) unload() error {
 }
 
 // destroy will attempt to destroy all the sensors in a collection
-func (c *collection) destroy() {
+func (c *collection) destroy(unpin bool) {
 	for _, s := range c.sensors {
-		s.Destroy()
+		s.Destroy(unpin)
 	}
-}
-
-func (cm *collectionMap) listPolicies() []*tetragon.TracingPolicyStatus {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	collections := cm.c
-
-	ret := make([]*tetragon.TracingPolicyStatus, 0, len(collections))
-	for ck, col := range collections {
-		if col.tracingpolicy == nil {
-			continue
-		}
-
-		pol := tetragon.TracingPolicyStatus{
-			Id:       col.tracingpolicyID,
-			Name:     ck.name,
-			Enabled:  col.state == EnabledState,
-			FilterId: col.policyfilterID,
-			State:    col.state.ToTetragonState(),
-		}
-
-		if col.err != nil {
-			pol.Error = col.err.Error()
-		}
-
-		pol.Namespace = ""
-		if tpNs, ok := col.tracingpolicy.(tracingpolicy.TracingPolicyNamespaced); ok {
-			pol.Namespace = tpNs.TpNamespace()
-		}
-
-		for _, sens := range col.sensors {
-			pol.Sensors = append(pol.Sensors, sens.GetName())
-		}
-
-		ret = append(ret, &pol)
-	}
-
-	return ret
 }

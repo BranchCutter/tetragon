@@ -4,6 +4,9 @@
 package eventmetrics
 
 import (
+	"maps"
+	"slices"
+
 	v1 "github.com/cilium/cilium/pkg/hubble/api/v1"
 	"github.com/cilium/tetragon/api/v1/tetragon"
 	"github.com/cilium/tetragon/api/v1/tetragon/codegen/helpers"
@@ -12,12 +15,26 @@ import (
 	"github.com/cilium/tetragon/pkg/logger"
 	"github.com/cilium/tetragon/pkg/metrics"
 	"github.com/cilium/tetragon/pkg/metrics/consts"
-	"github.com/cilium/tetragon/pkg/metrics/errormetrics"
 	"github.com/cilium/tetragon/pkg/metrics/syscallmetrics"
 	"github.com/cilium/tetragon/pkg/option"
 	"github.com/cilium/tetragon/pkg/reader/exec"
 	"github.com/cilium/tetragon/pkg/tracingpolicy"
 	"github.com/prometheus/client_golang/prometheus"
+)
+
+var (
+	perfEventErrors = map[int]string{
+		processapi.SentFailedUnknown: "unknown",
+		processapi.SentFailedEnoent:  "ENOENT",
+		processapi.SentFailedE2big:   "E2BIG",
+		processapi.SentFailedEbusy:   "EBUSY",
+		processapi.SentFailedEinval:  "EINVAL",
+		processapi.SentFailedEnospc:  "ENOSPC",
+	}
+	perfEventErrorLabel = metrics.ConstrainedLabel{
+		Name:   "error",
+		Values: slices.Collect(maps.Values(perfEventErrors)),
+	}
 )
 
 var (
@@ -27,10 +44,10 @@ var (
 		Help:        "The total number of Tetragon events",
 		ConstLabels: nil,
 	}, []string{"type"})
-	MissedEvents = metrics.NewBPFCounter(prometheus.NewDesc(
-		prometheus.BuildFQName(consts.MetricsNamespace, "", "missed_events_total"),
-		"The total number of Tetragon events per type that are failed to sent from the kernel.",
-		[]string{"msg_op"}, nil,
+	MissedEvents = metrics.MustNewCustomCounter(metrics.NewOpts(
+		consts.MetricsNamespace, "bpf", "missed_events_total",
+		"Number of Tetragon perf events that are failed to be sent from the kernel.",
+		nil, []metrics.ConstrainedLabel{metrics.OpCodeLabel, perfEventErrorLabel}, nil,
 	))
 	FlagCount = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace:   consts.MetricsNamespace,
@@ -51,21 +68,28 @@ var (
 		Help:        "Policy events calls observed.",
 		ConstLabels: nil,
 	}, []string{"policy", "hook"})
+
+	missingProcessInfo = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: consts.MetricsNamespace,
+		Name:      "events_missing_process_info_total",
+		Help:      "Number of events missing process info.",
+	})
 )
 
-func InitHealthMetrics(registry *prometheus.Registry) {
-	registry.MustRegister(FlagCount)
-	registry.MustRegister(NotifyOverflowedEvents)
-	// custom collectors are registered independently
+func RegisterHealthMetrics(group metrics.Group) {
+	group.MustRegister(
+		FlagCount,
+		NotifyOverflowedEvents,
+		NewBPFCollector(),
+		missingProcessInfo,
+	)
+}
 
+func InitHealthMetrics() {
 	// Initialize metrics with labels
 	for _, v := range exec.FlagStrings {
 		FlagCount.WithLabelValues(v).Add(0)
 	}
-
-	// NOTES:
-	// * op, msg_op, opcode - standardize on a label (+ add human-readable label)
-	// * event, event_type, type - standardize on a label
 }
 
 func InitEventsMetrics(registry *prometheus.Registry) {
@@ -95,7 +119,7 @@ func GetProcessInfo(process *tetragon.Process) (binary, pod, workload, namespace
 			pod = process.Pod.Name
 		}
 	} else {
-		errormetrics.ErrorTotalInc(errormetrics.EventMissingProcessInfo)
+		missingProcessInfo.Inc()
 	}
 	return binary, pod, workload, namespace
 }

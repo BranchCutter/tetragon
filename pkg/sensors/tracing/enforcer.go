@@ -8,12 +8,12 @@ import (
 	"path"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/cilium/tetragon/pkg/arch"
 	"github.com/cilium/tetragon/pkg/bpf"
 	"github.com/cilium/tetragon/pkg/k8s/apis/cilium.io/v1alpha1"
 	"github.com/cilium/tetragon/pkg/logger"
+	"github.com/cilium/tetragon/pkg/metrics/enforcermetrics"
 	"github.com/cilium/tetragon/pkg/option"
 	"github.com/cilium/tetragon/pkg/policyfilter"
 	"github.com/cilium/tetragon/pkg/sensors"
@@ -50,9 +50,22 @@ func init() {
 	sensors.RegisterPolicyHandlerAtInit("enforcer", gEnforcerPolicy)
 }
 
-func enforcerMap(policyName string, load ...*program.Program) *program.Map {
-	return program.MapBuilderPin(enforcerDataMapName,
-		fmt.Sprintf("%s_%s", enforcerDataMapName, policyName), load...)
+func enforcerMapsUser(load ...*program.Program) []*program.Map {
+	edm := program.MapUserPolicy(enforcerDataMapName, load...)
+	edm.SetMaxEntries(enforcerMapMaxEntries)
+	return []*program.Map{
+		edm,
+		program.MapUserPolicy(enforcermetrics.EnforcerMissedMapName, load...),
+	}
+}
+
+func enforcerMaps(load ...*program.Program) []*program.Map {
+	edm := program.MapBuilderPolicy(enforcerDataMapName, load...)
+	edm.SetMaxEntries(enforcerMapMaxEntries)
+	return []*program.Map{
+		edm,
+		program.MapBuilderPolicy(enforcermetrics.EnforcerMissedMapName, load...),
+	}
 }
 
 func (kp *enforcerPolicy) enforcerGet(name string) (*enforcerHandler, bool) {
@@ -95,9 +108,13 @@ func (kp *enforcerPolicy) PolicyHandler(
 			return nil, err
 		}
 	}
+
 	if len(spec.Enforcers) > 0 {
-		name := fmt.Sprintf("enforcer-sensor-%d", atomic.AddUint64(&sensorCounter, 1))
-		return kp.createEnforcerSensor(spec.Enforcers, spec.Lists, spec.Options, name, policy.TpName())
+		namespace := ""
+		if tpn, ok := policy.(tracingpolicy.TracingPolicyNamespaced); ok {
+			namespace = tpn.TpNamespace()
+		}
+		return kp.createEnforcerSensor(spec.Enforcers, spec.Lists, spec.Options, policy.TpName(), namespace)
 	}
 
 	return nil, nil
@@ -186,8 +203,8 @@ func (kp *enforcerPolicy) createEnforcerSensor(
 	enforcers []v1alpha1.EnforcerSpec,
 	lists []v1alpha1.ListSpec,
 	opts []v1alpha1.OptionSpec,
-	name string,
 	policyName string,
+	policyNamespace string,
 ) (*sensors.Sensor, error) {
 
 	if len(enforcers) > 1 {
@@ -202,47 +219,48 @@ func (kp *enforcerPolicy) createEnforcerSensor(
 	)
 
 	kh := &enforcerHandler{}
-
-	// get all the syscalls
-	for idx := range enforcer.Calls {
-		sym := enforcer.Calls[idx]
-		if strings.HasPrefix(sym, "list:") {
-			listName := sym[len("list:"):]
-
-			list := getList(listName, lists)
+	for _, call := range enforcer.Calls {
+		var symsToAdd []string
+		if isL, list := isList(call, lists); isL {
 			if list == nil {
-				return nil, fmt.Errorf("Error list '%s' not found", listName)
+				return nil, fmt.Errorf("Error list '%s' not found", call)
 			}
-
-			kh.syscallsSyms = append(kh.syscallsSyms, list.Values...)
-			continue
-		}
-
-		kh.syscallsSyms = append(kh.syscallsSyms, sym)
-	}
-
-	var err error
-
-	// fix syscalls
-	for idx, sym := range kh.syscallsSyms {
-		isPrefix := arch.HasSyscallPrefix(sym)
-		isSyscall := strings.HasPrefix(sym, "sys_")
-		isSecurity := strings.HasPrefix(sym, "security_")
-
-		if !isSyscall && !isSecurity && !isPrefix {
-			return nil, fmt.Errorf("enforcer sensor requires either syscall or security_ functions")
-		}
-
-		if isSyscall {
-			sym, err = arch.AddSyscallPrefix(sym)
-			if err != nil {
-				return nil, err
+			switch list.Type {
+			case "syscalls":
+				syms, err := getSyscallListSymbols(list)
+				if err != nil {
+					return nil, err
+				}
+				hasSyscall = true
+				// we know that this is a list of syscalls, so no need to check them
+				kh.syscallsSyms = append(kh.syscallsSyms, syms...)
+				continue
+			default:
+				// for everything else, we just append the symbols
+				symsToAdd = list.Values
 			}
-			kh.syscallsSyms[idx] = sym
+		} else {
+			symsToAdd = []string{call}
 		}
 
-		hasSyscall = hasSyscall || isSyscall || isPrefix
-		hasSecurity = hasSecurity || isSecurity
+		// check and add the rest of the symbols
+		for _, sym := range symsToAdd {
+			if arch.HasSyscallPrefix(sym) {
+				hasSyscall = true
+			} else if strings.HasPrefix(sym, "sys_") {
+				hasSyscall = true
+				var err error
+				sym, err = arch.AddSyscallPrefix(sym)
+				if err != nil {
+					return nil, err
+				}
+			} else if strings.HasPrefix(sym, "security_") {
+				hasSecurity = true
+			} else {
+				return nil, fmt.Errorf("enforcer sensor requires either syscall or security_ functions and symbol '%s' appears to be neither", sym)
+			}
+			kh.syscallsSyms = append(kh.syscallsSyms, sym)
+		}
 	}
 
 	// register enforcer sensor
@@ -277,7 +295,6 @@ func (kp *enforcerPolicy) createEnforcerSensor(
 		return nil, err
 	}
 
-	pinPath := sensors.PathJoin(name, "enforcer_kprobe")
 	switch overrideMethod {
 	case OverrideMethodReturn:
 		useMulti := !specOpts.DisableKprobeMulti && !option.Config.DisableKprobeMulti && bpf.HasKprobeMulti()
@@ -293,9 +310,10 @@ func (kp *enforcerPolicy) createEnforcerSensor(
 			path.Join(option.Config.HubbleLib, prog),
 			attach,
 			label,
-			pinPath,
+			"kprobe",
 			"enforcer").
-			SetLoaderData(name)
+			SetLoaderData(policyName).
+			SetPolicy(policyName)
 
 		progs = append(progs, load)
 	case OverrideMethodFmodRet:
@@ -306,33 +324,35 @@ func (kp *enforcerPolicy) createEnforcerSensor(
 				path.Join(option.Config.HubbleLib, "bpf_fmodret_enforcer.o"),
 				syscallSym,
 				"fmod_ret/security_task_prctl",
-				pinPath,
+				fmt.Sprintf("fmod_ret_%s", syscallSym),
 				"enforcer").
-				SetLoaderData(name)
+				SetLoaderData(policyName).
+				SetPolicy(policyName)
 			progs = append(progs, load)
 		}
 	default:
 		return nil, fmt.Errorf("unexpected override method: %d", overrideMethod)
 	}
 
-	enforcerDataMap := enforcerMap(policyName, progs...)
-	maps = append(maps, enforcerDataMap)
+	maps = append(maps, enforcerMaps(progs...)...)
 
-	if ok := kp.enforcerAdd(name, kh); !ok {
-		return nil, fmt.Errorf("failed to add enforcer: '%s'", name)
+	if ok := kp.enforcerAdd(policyName, kh); !ok {
+		return nil, fmt.Errorf("failed to add enforcer: '%s'", policyName)
 	}
 
-	logger.GetLogger().Infof("Added enforcer sensor '%s'", name)
+	logger.GetLogger().Infof("Added enforcer sensor '%s'", policyName)
 
 	return &sensors.Sensor{
-		Name:  "__enforcer__",
-		Progs: progs,
-		Maps:  maps,
-		PostUnloadHook: func() error {
-			if ok := kp.enforcerDel(name); !ok {
-				logger.GetLogger().Infof("Failed to clean up enforcer sensor '%s'", name)
+		Name:      "__enforcer__",
+		Progs:     progs,
+		Maps:      maps,
+		Policy:    policyName,
+		Namespace: policyNamespace,
+		DestroyHook: func() error {
+			if ok := kp.enforcerDel(policyName); !ok {
+				logger.GetLogger().Infof("Failed to clean up enforcer sensor '%s'", policyName)
 			} else {
-				logger.GetLogger().Infof("Cleaned up enforcer sensor '%s'", name)
+				logger.GetLogger().Infof("Cleaned up enforcer sensor '%s'", policyName)
 			}
 			return nil
 		},

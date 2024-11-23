@@ -24,7 +24,6 @@ import (
 	"github.com/cilium/tetragon/pkg/option"
 	"github.com/cilium/tetragon/pkg/policyfilter"
 	"github.com/cilium/tetragon/pkg/reader/notify"
-	"github.com/cilium/tetragon/pkg/sensors/base"
 	"github.com/cilium/tetragon/pkg/sensors/config/confmap"
 	testsensor "github.com/cilium/tetragon/pkg/sensors/test"
 	"github.com/cilium/tetragon/pkg/testutils"
@@ -114,9 +113,9 @@ func TestNamespacedPolicies(t *testing.T) {
 
 	policyfilter.TestingEnableAndReset(t)
 
-	tus.LoadSensor(t, base.GetInitialSensor())
+	tus.LoadInitialSensor(t)
 	tus.LoadSensor(t, testsensor.GetTestSensor())
-	sm := tus.GetTestSensorManager(ctx, t)
+	sm := tus.GetTestSensorManager(t)
 
 	// First, we create two lseek-pipe commands and add them to a different cgroup. See
 	// contrib/tester-progs/go/lseek-pipe for details of how lseek-pipe wowkrs, but basically it
@@ -269,10 +268,10 @@ func TestNamespacedPolicies(t *testing.T) {
 	podId1 := uuid.New()
 	podId2 := uuid.New()
 	require.NoError(t, err)
-	err = pfState.AddPodContainer(policyfilter.PodID(podId1), "ns1", nil,
+	err = pfState.AddPodContainer(policyfilter.PodID(podId1), "ns1", "wl1", "kind1", nil,
 		"pod1-container1", cgID1, "container-name1")
 	require.NoError(t, err)
-	err = pfState.AddPodContainer(policyfilter.PodID(podId2), "ns2", nil,
+	err = pfState.AddPodContainer(policyfilter.PodID(podId2), "ns2", "wl2", "kind2", nil,
 		"pod1-container2", cgID2, "container-name2")
 	require.NoError(t, err)
 

@@ -19,9 +19,12 @@ import (
 	"github.com/cilium/tetragon/pkg/logger"
 	"github.com/cilium/tetragon/pkg/metrics/eventmetrics"
 	"github.com/cilium/tetragon/pkg/option"
+	"github.com/cilium/tetragon/pkg/process"
 	"github.com/cilium/tetragon/pkg/sensors"
 	"github.com/cilium/tetragon/pkg/tracingpolicy"
 	"github.com/cilium/tetragon/pkg/version"
+
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -29,7 +32,7 @@ type Listener interface {
 	Notify(res *tetragon.GetEventsResponse)
 }
 
-type notifier interface {
+type Notifier interface {
 	AddListener(listener Listener)
 	RemoveListener(listener Listener)
 	NotifyListener(original interface{}, processed *tetragon.GetEventsResponse)
@@ -61,7 +64,7 @@ type hookRunner interface {
 type Server struct {
 	ctx          context.Context
 	ctxCleanupWG *sync.WaitGroup
-	notifier     notifier
+	notifier     Notifier
 	observer     observer
 	hookRunner   hookRunner
 }
@@ -70,7 +73,7 @@ type getEventsListener struct {
 	events chan *tetragon.GetEventsResponse
 }
 
-func NewServer(ctx context.Context, cleanupWg *sync.WaitGroup, notifier notifier, observer observer, hookRunner hookRunner) *Server {
+func NewServer(ctx context.Context, cleanupWg *sync.WaitGroup, notifier Notifier, observer observer, hookRunner hookRunner) *Server {
 	return &Server{
 		ctx:          ctx,
 		ctxCleanupWG: cleanupWg,
@@ -97,10 +100,6 @@ func (l *getEventsListener) Notify(res *tetragon.GetEventsResponse) {
 		// events channel is full: drop the event so that we do not block everything
 		eventmetrics.NotifyOverflowedEvents.Inc()
 	}
-}
-
-func (s *Server) NotifyListeners(original interface{}, processed *tetragon.GetEventsResponse) {
-	s.notifier.NotifyListener(original, processed)
 }
 
 // removeNotifierAndDrain removes the events listener while draining
@@ -374,7 +373,57 @@ func (s *Server) RuntimeHook(ctx context.Context, req *tetragon.RuntimeHookReque
 	logger.GetLogger().WithField("request", req).Debug("Received a RuntimeHook request")
 	err := s.hookRunner.RunHooks(ctx, req)
 	if err != nil {
-		logger.GetLogger().WithField("request", req).WithError(err).Warn("Server RuntimeHook failed")
+		id := uuid.New()
+		logger.GetLogger().WithFields(logrus.Fields{
+			"logid": id,
+		}).WithError(err).Warn("server runtime hook failed")
+		return nil, fmt.Errorf("server runtime hook failed. Check agent logs with logid=%s for details", id)
 	}
 	return &tetragon.RuntimeHookResponse{}, nil
+}
+
+func (s *Server) GetDebug(_ context.Context, req *tetragon.GetDebugRequest) (*tetragon.GetDebugResponse, error) {
+	switch req.GetFlag() {
+	case tetragon.ConfigFlag_CONFIG_FLAG_LOG_LEVEL:
+		logger.GetLogger().Debugf("Client requested current log level: %s", logger.GetLogLevel().String())
+		return &tetragon.GetDebugResponse{
+			Flag: tetragon.ConfigFlag_CONFIG_FLAG_LOG_LEVEL,
+			Arg: &tetragon.GetDebugResponse_Level{
+				Level: tetragon.LogLevel(logger.GetLogLevel()),
+			},
+		}, nil
+	case tetragon.ConfigFlag_CONFIG_FLAG_DUMP_PROCESS_CACHE:
+		logger.GetLogger().Debug("Client requested dump of process cache")
+		res := tetragon.DumpProcessCacheResArgs{
+			Processes: process.DumpProcessCache(req.GetDump()),
+		}
+		return &tetragon.GetDebugResponse{
+			Flag: tetragon.ConfigFlag_CONFIG_FLAG_DUMP_PROCESS_CACHE,
+			Arg: &tetragon.GetDebugResponse_Processes{
+				Processes: &res,
+			},
+		}, nil
+	default:
+		logger.GetLogger().WithField("request", req).Warnf("Client requested unknown config flag %d", req.GetFlag())
+		return nil, fmt.Errorf("client requested unknown config flag %d", req.GetFlag())
+	}
+}
+
+func (s *Server) SetDebug(_ context.Context, req *tetragon.SetDebugRequest) (*tetragon.SetDebugResponse, error) {
+	switch req.GetFlag() {
+	case tetragon.ConfigFlag_CONFIG_FLAG_LOG_LEVEL:
+		currentLogLevel := logger.GetLogLevel()
+		changedLogLevel := logrus.Level(req.GetLevel())
+		logger.SetLogLevel(changedLogLevel)
+		logger.GetLogger().WithField("request", req).Warnf("Log level changed from %s to %s", currentLogLevel, changedLogLevel.String())
+		return &tetragon.SetDebugResponse{
+			Flag: tetragon.ConfigFlag_CONFIG_FLAG_LOG_LEVEL,
+			Arg: &tetragon.SetDebugResponse_Level{
+				Level: tetragon.LogLevel(changedLogLevel),
+			},
+		}, nil
+	default:
+		logger.GetLogger().WithField("request", req).Warnf("Client requested change of unknown config flag %d", req.GetFlag())
+		return nil, fmt.Errorf("client requested change of unknown config flag %d", req.GetFlag())
+	}
 }

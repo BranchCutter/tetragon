@@ -16,57 +16,60 @@ import (
 	"github.com/cilium/tetragon/pkg/idtable"
 	"github.com/cilium/tetragon/pkg/k8s/apis/cilium.io/v1alpha1"
 	"github.com/cilium/tetragon/pkg/kernels"
+	"github.com/cilium/tetragon/pkg/mbset"
 	"github.com/cilium/tetragon/pkg/reader/namespace"
 	"github.com/cilium/tetragon/pkg/reader/network"
 )
 
 const (
-	ActionTypeInvalid        = -1
-	ActionTypePost           = 0
-	ActionTypeFollowFd       = 1
-	ActionTypeSigKill        = 2
-	ActionTypeUnfollowFd     = 3
-	ActionTypeOverride       = 4
-	ActionTypeCopyFd         = 5
-	ActionTypeGetUrl         = 6
-	ActionTypeDnsLookup      = 7
-	ActionTypeNoPost         = 8
-	ActionTypeSignal         = 9
-	ActionTypeTrackSock      = 10
-	ActionTypeUntrackSock    = 11
-	ActionTypeNotifyEnforcer = 12
+	ActionTypeInvalid                     = -1
+	ActionTypePost                        = 0
+	ActionTypeFollowFd                    = 1
+	ActionTypeSigKill                     = 2
+	ActionTypeUnfollowFd                  = 3
+	ActionTypeOverride                    = 4
+	ActionTypeCopyFd                      = 5
+	ActionTypeGetUrl                      = 6
+	ActionTypeDnsLookup                   = 7
+	ActionTypeNoPost                      = 8
+	ActionTypeSignal                      = 9
+	ActionTypeTrackSock                   = 10
+	ActionTypeUntrackSock                 = 11
+	ActionTypeNotifyEnforcer              = 12
+	ActionTypeCleanupEnforcerNotification = 13
 )
 
 var actionTypeTable = map[string]uint32{
-	"post":           ActionTypePost,
-	"followfd":       ActionTypeFollowFd,
-	"unfollowfd":     ActionTypeUnfollowFd,
-	"sigkill":        ActionTypeSigKill,
-	"override":       ActionTypeOverride,
-	"copyfd":         ActionTypeCopyFd,
-	"geturl":         ActionTypeGetUrl,
-	"dnslookup":      ActionTypeDnsLookup,
-	"nopost":         ActionTypeNoPost,
-	"signal":         ActionTypeSignal,
-	"tracksock":      ActionTypeTrackSock,
-	"untracksock":    ActionTypeUntrackSock,
-	"notifyenforcer": ActionTypeNotifyEnforcer,
+	"post":                        ActionTypePost,
+	"followfd":                    ActionTypeFollowFd,
+	"unfollowfd":                  ActionTypeUnfollowFd,
+	"sigkill":                     ActionTypeSigKill,
+	"override":                    ActionTypeOverride,
+	"copyfd":                      ActionTypeCopyFd,
+	"geturl":                      ActionTypeGetUrl,
+	"dnslookup":                   ActionTypeDnsLookup,
+	"nopost":                      ActionTypeNoPost,
+	"signal":                      ActionTypeSignal,
+	"tracksock":                   ActionTypeTrackSock,
+	"untracksock":                 ActionTypeUntrackSock,
+	"notifyenforcer":              ActionTypeNotifyEnforcer,
+	"cleanupenforcernotification": ActionTypeCleanupEnforcerNotification,
 }
 
 var actionTypeStringTable = map[uint32]string{
-	ActionTypePost:           "post",
-	ActionTypeFollowFd:       "followfd",
-	ActionTypeUnfollowFd:     "unfollowfd",
-	ActionTypeSigKill:        "sigkill",
-	ActionTypeOverride:       "override",
-	ActionTypeCopyFd:         "copyfd",
-	ActionTypeGetUrl:         "geturl",
-	ActionTypeDnsLookup:      "dnslookup",
-	ActionTypeNoPost:         "nopost",
-	ActionTypeSignal:         "signal",
-	ActionTypeTrackSock:      "tracksock",
-	ActionTypeUntrackSock:    "untracksock",
-	ActionTypeNotifyEnforcer: "notifyenforcer",
+	ActionTypePost:                        "post",
+	ActionTypeFollowFd:                    "followfd",
+	ActionTypeUnfollowFd:                  "unfollowfd",
+	ActionTypeSigKill:                     "sigkill",
+	ActionTypeOverride:                    "override",
+	ActionTypeCopyFd:                      "copyfd",
+	ActionTypeGetUrl:                      "geturl",
+	ActionTypeDnsLookup:                   "dnslookup",
+	ActionTypeNoPost:                      "nopost",
+	ActionTypeSignal:                      "signal",
+	ActionTypeTrackSock:                   "tracksock",
+	ActionTypeUntrackSock:                 "untracksock",
+	ActionTypeCleanupEnforcerNotification: "cleanupenforcernotification",
 }
 
 const (
@@ -711,7 +714,7 @@ func writePrefixStrings(k *KernelSelectorState, values []string) error {
 	return nil
 }
 
-func writePostfixStrings(k *KernelSelectorState, values []string, ty uint32) error {
+func writePostfix(k *KernelSelectorState, values []string, ty uint32, selector string) (uint32, error) {
 	mid, m := k.newStringPostfixMap()
 	for _, v := range values {
 		var value []byte
@@ -724,7 +727,7 @@ func writePostfixStrings(k *KernelSelectorState, values []string, ty uint32) err
 		// Due to the constraints of the reverse copy in BPF, we will not be able to match a postfix
 		// longer than 127 characters, so throw an error if the user specified one.
 		if size >= StringPostfixMaxLength {
-			return fmt.Errorf("MatchArgs value %s invalid: string is longer than %d characters", v, StringPostfixMaxLength-1)
+			return 0, fmt.Errorf("%s value %s invalid: string is longer than %d characters", selector, v, StringPostfixMaxLength-1)
 		}
 		val := KernelLPMTrieStringPostfix{prefixLen: size * 8} // postfix is in bits, but size is in bytes
 		// Copy postfix in reverse order, so that it can be used in LPM map
@@ -733,7 +736,18 @@ func writePostfixStrings(k *KernelSelectorState, values []string, ty uint32) err
 		}
 		m[val] = struct{}{}
 	}
-	// write the map id into the selector
+	return mid, nil
+}
+
+func writePostfixBinaries(k *KernelSelectorState, values []string) (uint32, error) {
+	return writePostfix(k, values, gt.GenericCharBuffer, "MatchBinaries")
+}
+
+func writePostfixStrings(k *KernelSelectorState, values []string, ty uint32) error {
+	mid, err := writePostfix(k, values, ty, "MatchArgs")
+	if err != nil {
+		return err
+	}
 	WriteSelectorUint32(&k.data, mid)
 	return nil
 }
@@ -951,6 +965,11 @@ func ParseMatchAction(k *KernelSelectorState, action *v1alpha1.ActionSelector, a
 			userStackTrace = 1
 		}
 		WriteSelectorUint32(&k.data, userStackTrace)
+		imaHash := uint32(0)
+		if action.ImaHash {
+			imaHash = 1
+		}
+		WriteSelectorUint32(&k.data, imaHash)
 	case ActionTypeNoPost:
 		// no arguments
 	case ActionTypeSigKill:
@@ -959,6 +978,13 @@ func ParseMatchAction(k *KernelSelectorState, action *v1alpha1.ActionSelector, a
 	case ActionTypeNotifyEnforcer:
 		WriteSelectorInt32(&k.data, action.ArgError)
 		WriteSelectorUint32(&k.data, action.ArgSig)
+		actionArgIndex := ^uint32(1)
+		if action.EnforcerNotifyActionArgIndex != nil {
+			actionArgIndex = *(action.EnforcerNotifyActionArgIndex)
+		}
+		WriteSelectorUint32(&k.data, actionArgIndex)
+	case ActionTypeCleanupEnforcerNotification:
+		// no arguments
 	default:
 		return fmt.Errorf("ParseMatchAction: act %d (%s) is missing a handler", act, actionTypeStringTable[act])
 	}
@@ -1181,6 +1207,16 @@ func ParseMatchBinary(k *KernelSelectorState, b *v1alpha1.BinarySelector, selIdx
 	// prepare the selector options
 	sel := MatchBinariesSelectorOptions{}
 	sel.Op = op
+	sel.MBSetID = mbset.InvalidID
+	if b.FollowChildren {
+		if op != SelectorOpIn {
+			return fmt.Errorf("matchBinary: followChildren not yet implemented for operation '%s'", b.Operator)
+		}
+		sel.MBSetID, err = mbset.AllocID()
+		if err != nil {
+			return fmt.Errorf("matchBinary followChildren: failed to allocate ID: %w", err)
+		}
+	}
 
 	switch op {
 	case SelectorOpIn, SelectorOpNotIn:
@@ -1198,8 +1234,16 @@ func ParseMatchBinary(k *KernelSelectorState, b *v1alpha1.BinarySelector, selIdx
 		if err != nil {
 			return fmt.Errorf("failed to write the prefix operator for the matchBinaries selector: %w", err)
 		}
+	case SelectorOpPostfix, SelectorOpNotPostfix:
+		if !kernels.EnableLargeProgs() {
+			return fmt.Errorf("matchBinary error: \"Postfix\" and \"NotPostfix\" operators need large BPF progs (kernel>5.3)")
+		}
+		sel.MapID, err = writePostfixBinaries(k, b.Values)
+		if err != nil {
+			return fmt.Errorf("failed to write the prefix operator for the matchBinaries selector: %w", err)
+		}
 	default:
-		return fmt.Errorf("matchBinary error: Only \"In\", \"NotIn\", \"Prefix\" and \"NotPrefix\" operators are supported")
+		return fmt.Errorf("matchBinary error: Only \"In\", \"NotIn\", \"Prefix\", \"NotPrefix\", \"Postfix\" and \"NotPostfix\" operators are supported")
 	}
 
 	k.AddMatchBinaries(selIdx, sel)
