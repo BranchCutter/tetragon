@@ -6,7 +6,6 @@ package tracing
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"testing"
 
@@ -26,18 +25,8 @@ func TestMatchBinariesFollowChildren(t *testing.T) {
 	testutils.CaptureLog(t, logger.GetLogger().(*logrus.Logger))
 	ctx, cancel := context.WithTimeout(context.Background(), tus.Conf().CmdWaitTime)
 	defer cancel()
-	shPath, err := exec.LookPath("sh")
-	if err != nil {
-		t.Fatalf("failed to find 'sh' exec: %v", err)
-	}
-	tmpShPath, err := testutils.CopyFileToTmp(shPath)
-	if err != nil {
-		t.Fatalf("failed to copy 'sh' exec: %v", err)
-	}
-	t.Cleanup(func() {
-		os.Remove(tmpShPath)
-	})
 
+	tmpShPath := testutils.CopyExecToTemp(t, "sh")
 	event := "sys_enter_getcpu"
 	spec := &v1alpha1.TracingPolicySpec{
 		Tracepoints: []v1alpha1.TracepointSpec{{
@@ -75,7 +64,16 @@ func TestMatchBinariesFollowChildren(t *testing.T) {
 			t.Fatalf("failed to run command %s: %v", cmd, err)
 		}
 	}
-
 	perfring.RunTest(t, ctx, ops, eventFn)
-	require.Equal(t, 1, getcpuCnt)
+	require.Equal(t, 1, getcpuCnt, "single exec")
+
+	getcpuCnt = 0
+	ops2 := func() {
+		cmd := exec.Command(tmpShPath, "-c", fmt.Sprintf("exec sh -c %s", getcpuBin))
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("failed to run command %s: %v", cmd, err)
+		}
+	}
+	perfring.RunTest(t, ctx, ops2, eventFn)
+	require.Equal(t, 1, getcpuCnt, "double exec")
 }

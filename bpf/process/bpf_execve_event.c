@@ -10,6 +10,7 @@
 #include "bpf_process_event.h"
 #include "bpf_helpers.h"
 #include "bpf_rate.h"
+#include "bpf_errmetrics.h"
 
 #include "policy_filter.h"
 
@@ -91,6 +92,9 @@ read_args(void *ctx, struct msg_execve_event *event)
 
 	size = p->size & 0x1ff /* 2*MAXARGLENGTH - 1*/;
 	args = (char *)p + size;
+#ifdef __LARGE_BPF_PROG
+	event->exe.arg_start = size;
+#endif
 
 	if (args >= (char *)&event->process + BUFFER)
 		return 0;
@@ -116,6 +120,9 @@ read_args(void *ctx, struct msg_execve_event *event)
 		if (size > 0)
 			p->flags |= EVENT_DATA_ARGS;
 	}
+#ifdef __LARGE_BPF_PROG
+	event->exe.arg_len = size;
+#endif
 	return size;
 }
 
@@ -123,7 +130,7 @@ FUNC_INLINE __u32
 read_path(void *ctx, struct msg_execve_event *event, void *filename)
 {
 	struct msg_process *p = &event->process;
-	__u32 size = 0;
+	__s32 size = 0;
 	__u32 flags = 0;
 	char *earg;
 
@@ -308,7 +315,7 @@ void update_mb_bitset(struct binary *bin)
 		/* ->mb_bitset is used to track matchBinary matches to children (followChildren), so
 		 * here we propagate the parent value to the child.
 		 */
-		bin->mb_bitset = parent->bin.mb_bitset;
+		bin->mb_bitset |= parent->bin.mb_bitset;
 	}
 
 	/* check the map and see if the binary path matches a binary
@@ -372,7 +379,13 @@ execve_send(void *ctx __arg_ctx)
 		if (curr->flags & EVENT_COMMON_FLAG_CLONE) {
 			event_set_clone(p);
 		}
-		curr->flags = 0;
+		curr->flags &= ~EVENT_COMMON_FLAG_CLONE;
+		/* Set EVENT_IN_INIT_TREE flag on the process if nspid=1.
+		 */
+		set_in_init_tree(curr, NULL);
+		if (curr->flags & EVENT_IN_INIT_TREE) {
+			event->process.flags |= EVENT_IN_INIT_TREE;
+		}
 #ifdef __NS_CHANGES_FILTER
 		if (init_curr)
 			memcpy(&(curr->ns), &(event->ns),
@@ -385,10 +398,11 @@ execve_send(void *ctx __arg_ctx)
 			curr->caps.inheritable = event->creds.caps.inheritable;
 		}
 #endif
-		// buffer can be written at clone stage with parent's info, if previous
-		// path is longer than current, we can have leftovers at the end.
-		memset(&curr->bin, 0, sizeof(curr->bin));
+		/* zero out previous paths in ->bin */
+		binary_reset(&curr->bin);
 #ifdef __LARGE_BPF_PROG
+		__u32 nullone, nulltwo, off, len;
+
 		// read from proc exe stored at execve time
 		if (event->exe.len <= BINARY_PATH_MAX_LEN) {
 			curr->bin.path_length = probe_read(curr->bin.path, event->exe.len, event->exe.buf);
@@ -400,6 +414,15 @@ execve_send(void *ctx __arg_ctx)
 				revlen = STRING_POSTFIX_MAX_LENGTH - 1;
 			probe_read(curr->bin.end, revlen, event->exe.end);
 		}
+
+		off = event->exe.arg_start & 0xff;
+		len = event->exe.arg_len & 0xff;
+		probe_read(curr->bin.args, len, (char *)&event->process + off);
+
+		nullone = len + 1;
+		nulltwo = len + 2;
+		curr->bin.args[nullone & 0xff] = 0x00; // null terminate string
+		curr->bin.args[nulltwo & 0xff] = 0x00; // null terminate string
 #else
 		// reuse p->args first string that contains the filename, this can't be
 		// above 256 in size (otherwise the complete will be send via data msg)

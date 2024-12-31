@@ -57,6 +57,10 @@ type Sensor struct {
 	Loaded bool
 	// Destroyed indicates whether the sensor had been destroyed.
 	Destroyed bool
+	// PostLoadHook can optionally contain a pointer to a function to be
+	// called during sensor loading, after the programs and maps being
+	// loaded.
+	PostLoadHook SensorHook
 	// PreUnloadHook can optionally contain a pointer to a function to be
 	// called during sensor unloading, prior to the programs and maps being
 	// unloaded.
@@ -89,14 +93,18 @@ func sanitize(name string) string {
 	return strings.ReplaceAll(name, "/", "_")
 }
 
-type ProgOverhead struct {
+type Prog struct {
 	Namespace string
 	Policy    string
 	Sensor    string
 	Attach    string
 	Label     string
-	RunTime   uint64
-	RunCnt    uint64
+}
+
+type ProgOverhead struct {
+	Prog
+	RunTime uint64
+	RunCnt  uint64
 }
 
 // SensorIface is an interface for sensors.Sensor that allows implementing sensors for testing.
@@ -127,9 +135,11 @@ func (s *Sensor) Overhead() ([]ProgOverhead, bool) {
 		runCnt, _ := info.RunCount()
 
 		list = append(list, ProgOverhead{
-			Attach:  p.Attach,
-			Label:   p.Label,
-			Sensor:  s.Name,
+			Prog: Prog{
+				Attach: p.Attach,
+				Label:  p.Label,
+				Sensor: s.Name,
+			},
 			RunTime: uint64(runTime),
 			RunCnt:  runCnt,
 		})

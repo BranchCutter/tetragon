@@ -8,6 +8,7 @@
 
 #include "bpf_cgroup.h"
 #include "bpf_cred.h"
+#include "cgroup/cgtracker.h"
 
 #define ENAMETOOLONG 36 /* File name too long */
 
@@ -536,16 +537,6 @@ __event_get_current_cgroup_name(struct cgroup *cgrp, struct msg_k8s *kube)
 {
 	const char *name;
 
-	/* TODO: check if we have Tetragon cgroup configuration and that the
-	 *     tracking cgroup ID is set. If so then query the bpf map for
-	 *     the corresponding tracking cgroup name.
-	 */
-
-	/* TODO: we gather current cgroup context, switch to tracker see above,
-	 *    and if that fails for any reason or if we don't have the cgroup name
-	 *    of tracker, then we can continue with current context.
-	 */
-
 	name = get_cgroup_name(cgrp);
 	if (name)
 		probe_read_str(kube->docker_id, KN_NAME_LENGTH, name);
@@ -587,11 +578,28 @@ __event_get_cgroup_info(struct task_struct *task, struct msg_k8s *kube)
 
 	/* Collect event cgroup ID */
 	kube->cgrpid = __tg_get_current_cgroup_id(cgrp, cgrpfs_magic);
-	if (!kube->cgrpid)
+	if (kube->cgrpid)
+		kube->cgrp_tracker_id = cgrp_get_tracker_id(kube->cgrpid);
+	else
 		flags |= EVENT_ERROR_CGROUP_ID;
 
 	/* Get the cgroup name of this event. */
 	flags |= __event_get_current_cgroup_name(cgrp, kube);
 	return flags;
+}
+
+FUNC_INLINE void
+set_in_init_tree(struct execve_map_value *curr, struct execve_map_value *parent)
+{
+	if (parent && parent->flags & EVENT_IN_INIT_TREE) {
+		curr->flags |= EVENT_IN_INIT_TREE;
+		DEBUG("%s: parent in init tree", __func__);
+		return;
+	}
+
+	if (curr->nspid == 1) {
+		curr->flags |= EVENT_IN_INIT_TREE;
+		DEBUG("%s: nspid=1", __func__);
+	}
 }
 #endif

@@ -27,7 +27,7 @@ jobs:
       uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
       with:
         # renovate: datasource=golang-version depName=go
-        go-version: '1.23.3'
+        go-version: '1.23.4'
 
     - name: Install build dependencies
       run: |
@@ -69,19 +69,19 @@ jobs:
               # renovate: datasource=docker depName=quay.io/lvh-images/kernel-images
               - 'rhel8.9-20240806.173325'
               # renovate: datasource=docker depName=quay.io/lvh-images/kernel-images
-              - 'bpf-next-20241122.013324'
+              - 'bpf-next-20241227.013317'
               # renovate: datasource=docker depName=quay.io/lvh-images/kernel-images
-              - '6.6-20241107.001101'
+              - '6.6-20241218.004849'
               # renovate: datasource=docker depName=quay.io/lvh-images/kernel-images
-              - '6.1-20241107.001101'
+              - '6.1-20241218.004849'
               # renovate: datasource=docker depName=quay.io/lvh-images/kernel-images
-              - '5.15-20241107.001101'
+              - '5.15-20241218.004849'
               # renovate: datasource=docker depName=quay.io/lvh-images/kernel-images
-              - '5.10-20241107.001101'
+              - '5.10-20241218.004849'
               # renovate: datasource=docker depName=quay.io/lvh-images/kernel-images
-              - '5.4-20241107.001101'
+              - '5.4-20241218.004849'
               # renovate: datasource=docker depName=quay.io/lvh-images/kernel-images
-              - '4.19-20241107.001101'
+              - '4.19-20241218.004849'
            group:
               - 0
     concurrency:

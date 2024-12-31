@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cilium/tetragon/pkg/cgidmap"
 	"github.com/cilium/tetragon/pkg/fieldfilters"
 	"github.com/cilium/tetragon/pkg/metrics/errormetrics"
 	"github.com/sirupsen/logrus"
@@ -62,7 +61,6 @@ type ProcessInternal struct {
 	refcntOps map[string]int32
 	// protects the refcntOps map
 	refcntOpsLock sync.Mutex
-	cgID          uint64
 }
 
 var (
@@ -139,10 +137,6 @@ func (pi *ProcessInternal) putProcess() {
 
 func (pi *ProcessInternal) UnsafeGetProcess() *tetragon.Process {
 	return pi.process
-}
-
-func (pi *ProcessInternal) GetCgID() uint64 {
-	return pi.cgID
 }
 
 // UpdateExecOutsideCache() checks if we must augment the ProcessExec.Process
@@ -278,7 +272,6 @@ func initProcessInternalExec(
 	parent tetragonAPI.MsgExecveKey,
 ) *ProcessInternal {
 	process := event.Process
-	containerID := event.Kube.Docker
 	args, cwd := ArgsDecoder(process.Args, process.Flags)
 	var parentExecID string
 	if parent.Pid != 0 {
@@ -288,8 +281,7 @@ func initProcessInternalExec(
 	}
 	creds := &event.Msg.Creds
 	execID := GetExecID(&process)
-	cgID := event.Kube.Cgrpid
-	protoPod := GetPodInfo(cgID, containerID, process.Filename, args, process.NSPID)
+	protoPod := GetPodInfo(event.Kube.Docker, process.Filename, args, process.NSPID)
 	apiCaps := caps.GetMsgCapabilities(event.Msg.Creds.Cap)
 	binary := path.GetBinaryAbsolutePath(process.Filename, cwd)
 	apiNs, err := namespace.GetMsgNamespaces(event.Msg.Namespaces)
@@ -372,7 +364,7 @@ func initProcessInternalExec(
 		}
 	}
 
-	return &ProcessInternal{
+	pi := &ProcessInternal{
 		process: &tetragon.Process{
 			Pid:          &wrapperspb.UInt32Value{Value: process.PID},
 			Tid:          &wrapperspb.UInt32Value{Value: process.TID},
@@ -385,7 +377,7 @@ func initProcessInternalExec(
 			Auid:         &wrapperspb.UInt32Value{Value: process.AUID},
 			Pod:          protoPod,
 			ExecId:       execID,
-			Docker:       containerID,
+			Docker:       event.Kube.Docker,
 			ParentExecId: parentExecID,
 			Refcnt:       0,
 			User:         user,
@@ -395,9 +387,17 @@ func initProcessInternalExec(
 		apiBinaryProp: apiBinaryProp,
 		namespaces:    apiNs,
 		refcnt:        1,
-		cgID:          event.Kube.Cgrpid,
 		refcntOps:     map[string]int32{"process++": 1},
 	}
+
+	// Set in_init_tree flag
+	if event.Process.Flags&api.EventInInitTree == api.EventInInitTree {
+		pi.process.InInitTree = &wrapperspb.BoolValue{Value: true}
+	} else {
+		pi.process.InInitTree = &wrapperspb.BoolValue{Value: false}
+	}
+
+	return pi
 }
 
 // initProcessInternalClone() initialize and returns ProcessInternal from
@@ -444,30 +444,22 @@ func initProcessInternalClone(event *tetragonAPI.MsgCloneEvent,
 		pi.process.Pod.Container.Pid = &wrapperspb.UInt32Value{Value: event.NSPID}
 	}
 	if option.Config.EnableK8s && pi.process.Docker != "" && pi.process.Pod == nil {
-		if podInfo := GetPodInfo(pi.cgID, pi.process.Docker, pi.process.Binary, pi.process.Arguments, event.NSPID); podInfo != nil {
+		if podInfo := GetPodInfo(pi.process.Docker, pi.process.Binary, pi.process.Arguments, event.NSPID); podInfo != nil {
 			pi.AddPodInfo(podInfo)
 		}
+	}
+	// Set in_init_tree flag
+	if event.Flags&api.EventInInitTree == api.EventInInitTree {
+		pi.process.InInitTree = &wrapperspb.BoolValue{Value: true}
+	} else {
+		pi.process.InInitTree = &wrapperspb.BoolValue{Value: false}
 	}
 
 	return pi, nil
 }
 
-// GetPodInfo constructs and returns the Kubernetes Pod information associated with
-// the Container ID and the PID inside this container.
-func GetPodInfo(cgID uint64, containerID, bin, args string, nspid uint32) *tetragon.Pod {
-	if option.Config.EnableCgIDmap {
-		cgIDmap, err := cgidmap.GlobalMap()
-		if err != nil {
-			logger.GetLogger().WithError(err).Warn("failed to get cgIdMap")
-			return nil
-		}
-		contID, ok := cgIDmap.Get(cgID)
-		if !ok {
-			return nil
-		}
-		containerID = contID
-	}
-
+// GetPodInfo constructs and returns the Kubernetes Pod information associated with an an event.
+func GetPodInfo(containerID, bin, args string, nspid uint32) *tetragon.Pod {
 	return getPodInfo(k8s, containerID, bin, args, nspid)
 }
 

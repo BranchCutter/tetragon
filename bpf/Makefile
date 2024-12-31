@@ -1,47 +1,89 @@
+# Copyright Authors of Tetragon
+# SPDX-License-Identifier: Apache-2.0
+
+# We build BPF objects in 2 stages:
+# - first we build dependency '.d' files for all object and include them
+#   directly in the Makefile to get all the dependency rules for the object
+# - then we build the all the objects
+#
+# We allow to build objects for specific kernel version (variant) with the
+# kernel version suffix. Each variant can define extra CFLAGS by defining
+# following variable:
+#
+#   CFLAGS_<version>   (example: CFLAGS_v53 := ...)
+#
+# Each object (standard or variant) can define extra CFLAGS by defining
+# following variable:
+#
+#   CFLAGS_<object.o>  (example: CFLAGS_bpf_enforcer.o = -D__BPF_OVERRIDE_RETURN)
+#
+# It's possible to make .ll file for any object, like:
+#
+#  $ make -C bpf objs/bpf_generic_kprobe_v61.ll
+
 .PHONY: all clean
 .SUFFIXES:
 
 include ./Makefile.defs
 
-ALIGNCHECKERDIR = alignchecker/
-PROCESSDIR := process/
-CGROUPDIR := cgroup/
-BPFTESTDIR := test/
-
 ALIGNCHECKER = bpf_alignchecker.o
-PROCESS = bpf_execve_event.o bpf_execve_event_v53.o bpf_fork.o bpf_exit.o bpf_generic_kprobe.o \
-	  bpf_execve_bprm_commit_creds.o \
-	  bpf_generic_kprobe_v53.o bpf_generic_retkprobe.o bpf_generic_retkprobe_v53.o \
-	  bpf_multi_kprobe_v53.o bpf_multi_retkprobe_v53.o \
-	  bpf_generic_tracepoint.o bpf_generic_tracepoint_v53.o \
-	  bpf_generic_uprobe.o bpf_generic_uprobe_v53.o \
-	  bpf_generic_lsm_core.o bpf_generic_lsm_output.o \
-	  bpf_generic_lsm_core_v511.o bpf_generic_lsm_output_v511.o \
-	  bpf_generic_lsm_ima_file_v511.o bpf_generic_lsm_ima_bprm_v511.o \
-	  bpf_execve_event_v61.o \
-	  bpf_generic_kprobe_v61.o bpf_generic_retkprobe_v61.o \
-	  bpf_generic_tracepoint_v61.o \
-	  bpf_multi_kprobe_v61.o bpf_multi_retkprobe_v61.o \
-	  bpf_generic_uprobe_v61.o \
-	  bpf_multi_uprobe_v61.o \
-	  bpf_execve_event_v511.o \
-	  bpf_generic_kprobe_v511.o bpf_generic_retkprobe_v511.o \
-	  bpf_generic_tracepoint_v511.o \
-	  bpf_multi_kprobe_v511.o bpf_multi_retkprobe_v511.o \
-	  bpf_generic_uprobe_v511.o \
-	  bpf_generic_lsm_core_v61.o bpf_generic_lsm_output_v61.o \
-	  bpf_generic_lsm_ima_file_v61.o bpf_generic_lsm_ima_bprm_v61.o \
-	  bpf_loader.o \
+
+# generic sensors
+PROCESS = bpf_loader.o \
 	  bpf_cgroup.o \
 	  bpf_enforcer.o bpf_multi_enforcer.o bpf_fmodret_enforcer.o \
 	  bpf_map_test_p1.o bpf_map_test_p2.o bpf_map_test_p3.o \
 	  bpf_prog_iter.o
 
-CGROUP = bpf_cgroup_mkdir.o bpf_cgroup_rmdir.o bpf_cgroup_release.o
+# v4.19
+# base sensor
+PROCESS += bpf_execve_event.o bpf_fork.o bpf_exit.o bpf_execve_bprm_commit_creds.o
+# generic probes
+PROCESS += bpf_generic_kprobe.o bpf_generic_retkprobe.o bpf_generic_tracepoint.o \
+	   bpf_generic_uprobe.o
+# lsm
+PROCESS += bpf_generic_lsm_core.o bpf_generic_lsm_output.o
+
+# v5.3
+# base sensor
+PROCESS += bpf_execve_event_v53.o
+# generic probes
+PROCESS += bpf_generic_kprobe_v53.o bpf_generic_retkprobe_v53.o \
+	   bpf_multi_kprobe_v53.o bpf_multi_retkprobe_v53.o \
+	   bpf_generic_tracepoint_v53.o bpf_generic_uprobe_v53.o
+
+# v5.11
+# base sensor
+PROCESS += bpf_execve_event_v511.o
+# generic probes
+PROCESS += bpf_generic_kprobe_v511.o bpf_generic_retkprobe_v511.o \
+	   bpf_multi_kprobe_v511.o bpf_multi_retkprobe_v511.o \
+	   bpf_generic_tracepoint_v511.o bpf_generic_uprobe_v511.o
+# lsm
+PROCESS += bpf_generic_lsm_core_v511.o bpf_generic_lsm_output_v511.o \
+	   bpf_generic_lsm_ima_file_v511.o bpf_generic_lsm_ima_bprm_v511.o
+
+# v6.1
+# base sensor
+PROCESS += bpf_execve_event_v61.o
+# generic probes
+PROCESS += bpf_generic_kprobe_v61.o bpf_generic_retkprobe_v61.o \
+	   bpf_multi_kprobe_v61.o bpf_multi_retkprobe_v61.o \
+	   bpf_generic_tracepoint_v61.o bpf_generic_uprobe_v61.o \
+	   bpf_multi_uprobe_v61.o
+# lsm
+PROCESS += bpf_generic_lsm_core_v61.o bpf_generic_lsm_output_v61.o \
+	   bpf_generic_lsm_ima_file_v61.o bpf_generic_lsm_ima_bprm_v61.o
+
+CGROUP = bpf_cgroup_mkdir.o bpf_cgroup_rmdir.o bpf_cgroup_release.o bpf_cgtracker.o
 BPFTEST = bpf_lseek.o
 
-OBJSDIR       := objs/
-DEPSDIR       := deps/
+OBJSDIR         := objs/
+DEPSDIR         := deps/
+ALIGNCHECKERDIR := alignchecker/
+PROCESSDIR      := process/
+CGROUPDIR       := cgroup/
+BPFTESTDIR      := test/
 
 TLSOBJ        := $(addprefix $(OBJSDIR),$(TLS))
 NOPOBJ        := $(addprefix $(OBJSDIR),$(NOP))
@@ -50,15 +92,13 @@ CGROUPOBJ     := $(addprefix $(OBJSDIR),$(CGROUP))
 TESTOBJ       := $(addprefix $(OBJSDIR),$(BPFTEST))
 ALIGNCHECKEROBJ := $(addprefix $(OBJSDIR),$(ALIGNCHECKER))
 OBJS          := $(PROCESSOBJ) $(CGROUPOBJ) $(TESTOBJ) $(NOPOBJ) $(ALIGNCHECKEROBJ)
-LLOBJS        := $(patsubst $(OBJSDIR)%.o,$(OBJSDIR)%.ll,$(OBJS))
-DEPS          := $(patsubst $(OBJSDIR)%.ll,$(DEPSDIR)%.d,$(LLOBJS))
+DEPS          := $(patsubst $(OBJSDIR)%.o,$(DEPSDIR)%.d,$(OBJS))
 
 all: $(OBJS) $(DEPS)
 
 # NB: https://www.gnu.org/software/make/manual/html_node/Prerequisite-Types.html
 $(OBJS): | $(OBJSDIR)
 $(DEPS): | $(DEPSDIR)
-$(LLOBJS): | $(OBJSDIR)
 
 $(OBJSDIR):
 	mkdir $(OBJSDIR)
@@ -66,127 +106,96 @@ $(OBJSDIR):
 $(DEPSDIR):
 	mkdir $(DEPSDIR)
 
+# Define extra CFLAGS for each variant
+CFLAGS_v53  = -D__LARGE_BPF_PROG
+CFLAGS_v511 = -D__LARGE_BPF_PROG -D__LARGE_MAP_KEYS
+CFLAGS_v61  = -D__LARGE_BPF_PROG -D__LARGE_MAP_KEYS -D__V61_BPF_PROG
+
+# Define extra CFLAGS for objects
+CFLAGS_bpf_enforcer.o           = -D__BPF_OVERRIDE_RETURN
+CFLAGS_bpf_multi_enforcer.o     = -D__BPF_OVERRIDE_RETURN -D__MULTI_KPROBE
+CFLAGS_bpf_generic_lsm_core.o   = -D__LARGE_BPF_PROG
+CFLAGS_bpf_generic_lsm_output.o = -D__LARGE_BPF_PROG
+
+# Rules
+MTARGET_o  = $(patsubst $(DEPSDIR)%.d,$(OBJSDIR)%.o,$@)
+MTARGET_ll = $(patsubst $(DEPSDIR)%.d,$(OBJSDIR)%.ll,$@)
+MTARGET_i = $(patsubst $(DEPSDIR)%.d,$(OBJSDIR)%.i,$@)
+
+rule_d_CFLAGS  = $(CFLAGS_$(notdir $(MTARGET_o)))
+rule_o_CFLAGS  = $(CFLAGS_$(notdir $@))
+rule_ll_CFLAGS = $(CFLAGS_$(notdir $(patsubst %.ll,%.o,$@)))
+
+rule_d  = $(CLANG) $(CLANG_FLAGS) $(rule_d_CFLAGS) $1 -MM -MP -MT $(MTARGET_o)  $< >  $@ && \
+          $(CLANG) $(CLANG_FLAGS) $(rule_d_CFLAGS) $1 -MM -MP -MT $(MTARGET_ll) $< >> $@ && \
+          $(CLANG) $(CLANG_FLAGS) $(rule_d_CFLAGS) $1 -MM -MP -MT $(MTARGET_i) $< >> $@
+rule_o  = $(CLANG) $(CLANG_FLAGS) $(rule_o_CFLAGS) $1 -c $< -o $@
+rule_ll = $(CLANG) $(CLANG_FLAGS) $(rule_ll_CFLAGS) -emit-llvm $1 -c $< -o $@
+rule_i  = $(CLANG) $(CLANG_FLAGS) $(rule_o_CFLAGS) $1 -E $< -o $@
+
+VARIANT_CFLAGS = $$(CFLAGS_$1)
+
+# Variant rules
 define DEFINE_VARIANT
 VAR := $1
-deps/bpf_execve_event_$$(VAR).d: process/bpf_execve_event.c
-deps/bpf_generic_kprobe_$$(VAR).d: process/bpf_generic_kprobe.c
-deps/bpf_generic_retkprobe_$$(VAR).d: process/bpf_generic_retkprobe.c
-deps/bpf_multi_kprobe_$$(VAR).d: process/bpf_generic_kprobe.c
-deps/bpf_multi_retkprobe_$$(VAR).d: process/bpf_generic_retkprobe.c
-deps/bpf_generic_tracepoint_$$(VAR).d: process/bpf_generic_tracepoint.c
-deps/bpf_generic_uprobe_$$(VAR).d: process/bpf_generic_uprobe.c
-deps/bpf_multi_uprobe_$$(VAR).d: process/bpf_generic_uprobe.c
-deps/bpf_generic_lsm_core_$$(VAR).d: process/bpf_generic_lsm_core.c
-deps/bpf_generic_lsm_output_$$(VAR).d: process/bpf_generic_lsm_output.c
-deps/bpf_generic_lsm_ima_bprm_$$(VAR).d: process/bpf_generic_lsm_ima_bprm.c
-deps/bpf_generic_lsm_ima_file_$$(VAR).d: process/bpf_generic_lsm_ima_file.c
-endef
 
-# Generic build targets for each sub-dir
+# We need to define extra rules for multi probes because the object name
+# is different then the source file.
+$(DEPSDIR)bpf_multi_kprobe_$$(VAR).d: $(PROCESSDIR)bpf_generic_kprobe.c
+$(DEPSDIR)bpf_multi_retkprobe_$$(VAR).d: $(PROCESSDIR)bpf_generic_retkprobe.c
+$(DEPSDIR)bpf_multi_uprobe_$$(VAR).d: $(PROCESSDIR)bpf_generic_uprobe.c
+
+# Object build rule for VARIANT objects
+$(OBJSDIR)%_$$(VAR).o:
+	$$(call rule_o,$(VARIANT_CFLAGS))
+
+$(OBJSDIR)%_$$(VAR).i:
+	$$(call rule_i,$(VARIANT_CFLAGS))
+
+$(OBJSDIR)%_$$(VAR).ll:
+	$$(call rule_ll,$(VARIANT_CFLAGS))
+
+# Generic dependency files for VARIANT objects
+$(DEPSDIR)%_$$(VAR).d: $(PROCESSDIR)%.c
+	$$(call rule_d,$(VARIANT_CFLAGS))
+
+# Define extra CFLAGS for variant objects
+CFLAGS_bpf_multi_kprobe_$$(VAR).o    = -D__MULTI_KPROBE
+CFLAGS_bpf_multi_retkprobe_$$(VAR).o = -D__MULTI_KPROBE
+ifeq (v61,$$(VAR))
+CFLAGS_bpf_multi_uprobe_$$(VAR).o    = -D__MULTI_KPROBE
+endif
+
+endef
 
 $(eval $(call DEFINE_VARIANT,v53))
 $(eval $(call DEFINE_VARIANT,v511))
 $(eval $(call DEFINE_VARIANT,v61))
 
-# ALIGNCHECKER
-objs/%.ll: $(ALIGNCHECKERDIR)%.c
-	$(CLANG) $(CLANG_FLAGS) -c $< -o $@
+# Object build rule for non VARIANT objects
+objs/%.o:
+	$(rule_o)
+
+objs/%.i:
+	$(rule_i)
+
+objs/%.ll:
+	$(rule_ll)
+
+# Generic dependency files
+$(DEPSDIR)bpf_multi_enforcer.d: $(PROCESSDIR)bpf_enforcer.c
+$(DEPSDIR)bpf_fmodret_enforcer.d: $(PROCESSDIR)bpf_enforcer.c
 
 $(DEPSDIR)%.d: $(ALIGNCHECKERDIR)%.c
-	$(CLANG) $(CLANG_FLAGS) -MM -MP -MT $(patsubst $(DEPSDIR)%.d, $(OBJSDIR)%.ll, $@)   $< > $@
-
-
-# Enforcer programs: bpf_enforcer, bpf_multi_enforcer, bpf_fmodret_enforcer
-
-## bpf_enforcer: __BPF_OVERRIDE_RETURN, but no __MULTI_KPROBE
-objs/bpf_enforcer.ll: process/bpf_enforcer.c
-	$(CLANG) $(CLANG_FLAGS) -D__BPF_OVERRIDE_RETURN -c $< -o $@
-
-$(DEPSDIR)bpf_enforcer.d: process/bpf_enforcer.c
-	$(CLANG) $(CLANG_FLAGS) -D__BPF_OVERRIDE_RETURN -MM -MP -MT $(patsubst $(DEPSDIR)%.d, $(OBJSDIR)%.ll, $@) $< > $@
-
-## bpf_multi_enforcer: __BPF_OVERRIDE_RETURN and __MULTI_KPROBE
-objs/bpf_multi_enforcer.ll: process/bpf_enforcer.c
-	$(CLANG) $(CLANG_FLAGS) -D__BPF_OVERRIDE_RETURN -D__MULTI_KPROBE -c $< -o $@
-
-$(DEPSDIR)bpf_multi_enforcer.d: process/bpf_enforcer.c
-	$(CLANG) $(CLANG_FLAGS) -D__BPF_OVERRIDE_RETURN -D__MULTI_KPROBE -MM -MP -MT $(patsubst $(DEPSDIR)%.d, $(OBJSDIR)%.ll, $@) $< > $@
-
-## bpf_fmodret_enforcer no bpf_override_return: we need fmod_ret
-objs/bpf_fmodret_enforcer.ll: process/bpf_enforcer.c
-	$(CLANG) $(CLANG_FLAGS) -c $< -o $@
-
-$(DEPSDIR)bpf_fmodret_enforcer.d: process/bpf_enforcer.c
-	$(CLANG) $(CLANG_FLAGS) -MM -MP -MT $(patsubst $(DEPSDIR)%.d, $(OBJSDIR)%.ll, $@) $< > $@
-
-# PROCESSDIR
-objs/%.ll: $(PROCESSDIR)%.c
-	$(CLANG) $(CLANG_FLAGS) -c $< -o $@
-
-objs/bpf_multi_kprobe_v53.ll objs/bpf_multi_retkprobe_v53.ll:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -D__MULTI_KPROBE -c $< -o $@
-
-objs/%_v53.ll:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -c $< -o $@
-
+	$(rule_d)
 $(DEPSDIR)%.d: $(PROCESSDIR)%.c
-	$(CLANG) $(CLANG_FLAGS) -MM -MP -MT $(patsubst $(DEPSDIR)%.d, $(OBJSDIR)%.ll, $@)   $< > $@
-
-
-$(DEPSDIR)%_v53.d:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -MM -MP -MT $(patsubst $(DEPSDIR)%.d, $(OBJSDIR)%.ll, $@)   $< > $@
-
-objs/bpf_multi_kprobe_v61.ll objs/bpf_multi_retkprobe_v61.ll:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -D__LARGE_MAP_KEYS -D__V61_BPF_PROG -D__MULTI_KPROBE -c $< -o $@
-
-objs/bpf_multi_uprobe_v61.ll:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -D__V61_BPF_PROG -D__MULTI_KPROBE -c $< -o $@
-
-objs/%_v61.ll:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -D__LARGE_MAP_KEYS -D__V61_BPF_PROG -c $< -o $@
-
-$(DEPSDIR)%_v61.d:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -D__LARGE_MAP_KEYS -D__V61_BPF_PROG -MM -MP -MT $(patsubst $(DEPSDIR)%.d, $(OBJSDIR)%.ll, $@)   $< > $@
-
-objs/bpf_multi_kprobe_v511.ll objs/bpf_multi_retkprobe_v511.ll:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -D__LARGE_MAP_KEYS -D__MULTI_KPROBE -c $< -o $@
-
-objs/%_v511.ll:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -D__LARGE_MAP_KEYS -c $< -o $@
-
-$(DEPSDIR)%_v511.d:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -D__LARGE_MAP_KEYS -MM -MP -MT $(patsubst $(DEPSDIR)%.d, $(OBJSDIR)%.ll, $@)   $< > $@
-
-objs/bpf_generic_lsm_core.ll: process/bpf_generic_lsm_core.c
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -c $< -o $@
-
-$(DEPSDIR)/bpf_generic_lsm_core.d:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -MM -MP -MT $(patsubst $(DEPSDIR)bpf_generic_lsm_core.d, $(OBJSDIR)bpf_generic_lsm_core.ll, $@)   $< > $@
-
-objs/bpf_generic_lsm_output.ll: process/bpf_generic_lsm_output.c
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -c $< -o $@
-
-$(DEPSDIR)/bpf_generic_lsm_output.d:
-	$(CLANG) $(CLANG_FLAGS) -D__LARGE_BPF_PROG -MM -MP -MT $(patsubst $(DEPSDIR)bpf_generic_lsm_output.d, $(OBJSDIR)bpf_generic_lsm_output.ll, $@)   $< > $@
-
-
-# BPFTESTDIR
-objs/%.ll: $(BPFTESTDIR)%.c
-	$(CLANG) $(CLANG_FLAGS) -c $< -o $@
-
+	$(rule_d)
 $(DEPSDIR)%.d: $(BPFTESTDIR)%.c
-	$(CLANG) $(CLANG_FLAGS) -MM -MP -MT $(patsubst $(DEPSDIR)%.d, $(OBJSDIR)%.ll, $@)   $< > $@
-
-# CGROUPDIR
-objs/%.ll: $(CGROUPDIR)%.c
-	$(CLANG) $(CLANG_FLAGS) -c $< -o $@
-
+	$(rule_d)
 $(DEPSDIR)%.d: $(CGROUPDIR)%.c
-	$(CLANG) $(CLANG_FLAGS) -MM -MP -MT $(patsubst $(DEPSDIR)%.d, $(OBJSDIR)%.ll, $@)   $< > $@
-
-# Remaining objects are built without mcpu=v2
-objs/%.o: objs/%.ll
-	$(LLC) $(LLC_FLAGS) -filetype=obj $< -o $@
+	$(rule_d)
+$(DEPSDIR)%.d:
+	$(rule_d)
 
 # include dependencies, see https://lists.gnu.org/archive/html/make-w32/2004-03/msg00062.html
 ifeq (,$(filter $(MAKECMDGOALS),clean run-test))

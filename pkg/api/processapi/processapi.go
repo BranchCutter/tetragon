@@ -46,6 +46,7 @@ const (
 	MSG_COMMON_FLAG_IMA_HASH          = 0x8
 
 	BINARY_PATH_MAX_LEN = 256
+	MAX_ARG_LENGTH      = 256
 
 	STRING_POSTFIX_MAX_LENGTH = 128
 )
@@ -94,13 +95,15 @@ type MsgCommon struct {
 }
 
 type MsgK8s struct {
-	Cgrpid uint64
-	Docker [DOCKER_ID_LENGTH]byte
+	Cgrpid        uint64
+	CgrpTrackerID uint64
+	Docker        [DOCKER_ID_LENGTH]byte
 }
 
 type MsgK8sUnix struct {
-	Docker string
-	Cgrpid uint64
+	Docker        string
+	Cgrpid        uint64
+	CgrpTrackerID uint64
 }
 
 type MsgGenericCred struct {
@@ -156,6 +159,7 @@ type Binary struct {
 	Path       [BINARY_PATH_MAX_LEN]byte
 	End        [STRING_POSTFIX_MAX_LENGTH]byte
 	End_r      [STRING_POSTFIX_MAX_LENGTH]byte
+	Args       [MAX_ARG_LENGTH]byte
 	MBSet      uint64
 }
 

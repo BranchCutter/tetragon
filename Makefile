@@ -105,6 +105,13 @@ clean: cli-clean tarball-clean
 
 ##@ Build and install
 
+pkg/errmetrics/fileids.json: bpf/tetragon/fileids.h
+	go run ./cmd/bpf-fileids bpf/tetragon/fileids.h pkg/errmetrics/fileids.json
+
+.PHONY: fileids
+fileids: pkg/errmetrics/fileids.json
+
+
 .PHONY: tetragon
 tetragon: ## Compile the Tetragon agent.
 	$(GO_BUILD) ./cmd/tetragon/
@@ -114,7 +121,7 @@ tetragon-operator: ## Compile the Tetragon operator.
 	$(GO_BUILD) -o $@ ./operator
 
 .PHONY: tetra
-tetra: ## Compile the Tetragon gRPC client.
+tetra: fileids ## Compile the Tetragon gRPC client.
 	$(GO_BUILD) ./cmd/tetra/
 
 .PHONY: tetragon-bpf
@@ -236,7 +243,7 @@ tarball-clean:
 ##@ Test
 
 # renovate: datasource=docker
-GOLANGCILINT_IMAGE=docker.io/golangci/golangci-lint:v1.61.0@sha256:e47065d755ca0afeac9df866d1dabdc99f439653a43fe234e05f50d9c36b6b90
+GOLANGCILINT_IMAGE=docker.io/golangci/golangci-lint:v1.62.2@sha256:4e53bfe25ef2f1e14a95da42d694211080f40d118730541ce1513a83cf7587ec
 GOLANGCILINT_WANT_VERSION := $(subst @sha256,,$(patsubst v%,%,$(word 2,$(subst :, ,$(lastword $(subst /, ,$(GOLANGCILINT_IMAGE)))))))
 GOLANGCILINT_VERSION = $(shell golangci-lint version 2>/dev/null)
 .PHONY: check

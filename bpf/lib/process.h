@@ -140,6 +140,7 @@
 #define EVENT_ERROR_PATH_COMPONENTS   0x400000
 #define EVENT_DATA_FILENAME	      0x800000
 #define EVENT_DATA_ARGS		      0x1000000
+#define EVENT_IN_INIT_TREE	      0x2000000
 
 #define EVENT_COMMON_FLAG_CLONE 0x01
 
@@ -266,6 +267,7 @@ struct msg_ns {
 
 struct msg_k8s {
 	__u64 cgrpid;
+	__u64 cgrp_tracker_id;
 	char docker_id[DOCKER_ID_LENGTH];
 }; // All fields aligned so no 'packed' attribute.
 
@@ -276,6 +278,8 @@ struct heap_exe {
 	char end[STRING_POSTFIX_MAX_LENGTH];
 	__u32 len;
 	__u32 error;
+	__u32 arg_len;
+	__u32 arg_start;
 }; // All fields aligned so no 'packed' attribute.
 
 struct msg_execve_event {
@@ -321,9 +325,24 @@ struct binary {
 	char end[STRING_POSTFIX_MAX_LENGTH];
 	// STRING_POSTFIX_MAX_LENGTH reversed last bytes of the path
 	char end_r[STRING_POSTFIX_MAX_LENGTH];
+	// args for the binary
+	char args[MAXARGLENGTH];
 	// matchBinary bitset for binary
+	// NB: everything after and including ->mb_bitset will not be zeroed on a new exec. See
+	// binary_reset().
 	mbset_t mb_bitset;
 }; // All fields aligned so no 'packed' attribute
+
+FUNC_INLINE void
+binary_reset(struct binary *b)
+{
+	// buffer can be written at clone stage with parent's info, if previous path is longer than
+	// current, we can have leftovers at the end, so zero out bin structure.
+	//
+	// Do not zero the ->mb_bitset however, so that it can be inherited if exec() is called.
+	// This depends on ->mb_bitset being the last part of the struct.
+	memset(b, 0, offsetof(struct binary, mb_bitset));
+}
 
 // The execve_map_value is tracked by the TGID of the thread group
 // the msg_execve_key.pid. The thread IDs are recorded on the
